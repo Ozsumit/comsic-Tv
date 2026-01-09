@@ -20,7 +20,7 @@ import {
   Plus,
   Pin,
 } from "lucide-react";
-import { Channel } from "@/lib/playlist";
+import { Channel } from "@/lib/playlists";
 
 const SPORTS_KEYWORDS = [
   "sport",
@@ -76,6 +76,7 @@ export default function CosmicTVClient({ initialChannels }: ClientProps) {
   }, []);
 
   // -- PLAYER LOGIC --
+  // -- PLAYER LOGIC --
   useEffect(() => {
     if (!currentChannel || !videoRef.current) return;
     const video = videoRef.current;
@@ -108,23 +109,40 @@ export default function CosmicTVClient({ initialChannels }: ClientProps) {
       if (Hls.isSupported()) {
         if (hls) hls.destroy();
 
-        // --- CUSTOM LOADER TO FIX MIXED CONTENT ---
-        // This intercepts every request. If it's HTTP, it proxies it.
+        // --- CUSTOM LOADER TO FIX MIXED CONTENT & CORS ---
         class MixedContentLoader extends Hls.DefaultConfig.loader {
           constructor(config: any) {
             super(config);
             const load = this.load.bind(this);
             this.load = (context: any, config: any, callbacks: any) => {
-              // Check if we are on HTTPS but the stream is HTTP
-              if (
-                window.location.protocol === "https:" &&
-                context.url.startsWith("http://")
-              ) {
-                // Force CORS Proxy for this specific chunk/manifest
-                context.url = `https://corsproxy.io/?${encodeURIComponent(
-                  context.url
+              // 1. Try Direct if HTTPS matches or we are on localhost
+              // 2. If it's HTTP on HTTPS, or known CORS issue, Proxy it.
+
+              let targetUrl = context.url;
+
+              // Check if we need to proxy
+              const needsProxy =
+                (window.location.protocol === "https:" &&
+                  targetUrl.startsWith("http://")) ||
+                targetUrl.includes("corsproxy.io"); // cleanup old proxy if present
+
+              if (needsProxy) {
+                // Remove existing proxy prefix if it exists to avoid double proxying
+                const cleanUrl = targetUrl.replace(
+                  /^(https?:\/\/)(corsproxy\.io\/\?|api\.codetabs\.com\/v1\/proxy\?quest=)/,
+                  ""
+                );
+
+                // Use a different, more reliable proxy service
+                // Option A: CodeTabs (Good for streams)
+                context.url = `https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(
+                  cleanUrl
                 )}`;
+
+                // Option B: AllOrigins (Alternative if Option A fails)
+                // context.url = `https://api.allorigins.win/raw?url=${encodeURIComponent(cleanUrl)}`;
               }
+
               load(context, config, callbacks);
             };
           }
@@ -133,22 +151,24 @@ export default function CosmicTVClient({ initialChannels }: ClientProps) {
         hls = new Hls({
           enableWorker: true,
           lowLatencyMode: true,
-          // @ts-ignore - Hls.js types can be finicky with custom loaders
+          // @ts-ignore
           loader: MixedContentLoader,
+          // Add stricter config to handle proxy timeouts
+          manifestLoadingTimeOut: 20000,
+          manifestLoadingMaxRetry: 2,
         });
 
         hls.on(Hls.Events.ERROR, (event, data) => {
           if (data.fatal) {
-            console.error("HLS Error", data);
+            console.error("HLS Fatal Error", data);
             if (data.type === Hls.ErrorTypes.NETWORK_ERROR) {
-              // If it failed even with the proxy, it's likely a dead stream (404/403)
-              setPlayerStatus("dead");
-              hls?.destroy();
+              // Try to recover network error once
+              hls?.startLoad();
             } else if (data.type === Hls.ErrorTypes.MEDIA_ERROR) {
               hls?.recoverMediaError();
             } else {
               hls?.destroy();
-              setPlayerStatus("error");
+              setPlayerStatus("dead");
             }
           }
         });
@@ -160,16 +180,18 @@ export default function CosmicTVClient({ initialChannels }: ClientProps) {
         });
         hls.on(Hls.Events.FRAG_LOADED, handleSuccess);
       } else if (video.canPlayType("application/vnd.apple.mpegurl")) {
-        // Safari has native HLS support.
-        // Note: Safari handles Mixed Content differently, but often fails silently on Strict mode.
-        // We try to proxy the main URL immediately for Safari.
+        // Safari (Native HLS) Logic
         let finalUrl = currentChannel.url;
+
+        // Safari requires proxy for Mixed Content (HTTP on HTTPS)
         if (
           typeof window !== "undefined" &&
           window.location.protocol === "https:" &&
           finalUrl.startsWith("http://")
         ) {
-          finalUrl = `https://corsproxy.io/?${encodeURIComponent(finalUrl)}`;
+          finalUrl = `https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(
+            finalUrl
+          )}`;
         }
 
         video.src = finalUrl;
