@@ -20,7 +20,7 @@ import {
   Plus,
   Pin,
 } from "lucide-react";
-import { Channel } from "@/lib/playlist";
+import { Channel } from "@/lib/playlists";
 
 const SPORTS_KEYWORDS = [
   "sport",
