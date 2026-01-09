@@ -20,7 +20,7 @@ import {
   Pin,
   Loader2,
 } from "lucide-react";
-
+import Image from "next/image";
 // --- Types ---
 export interface Channel {
   id: string;
