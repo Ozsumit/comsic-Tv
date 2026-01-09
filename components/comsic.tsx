@@ -5,7 +5,6 @@ import Hls from "hls.js";
 import {
   Play,
   Search,
-  Disc,
   Tv,
   Trophy,
   Globe,
@@ -21,9 +20,8 @@ import {
   Plus,
   Pin,
 } from "lucide-react";
-import { Channel } from "@/lib/playlists"; // Import the type
+import { Channel } from "@/lib/playlist";
 
-// Re-define keywords strictly for filtering logic in UI
 const SPORTS_KEYWORDS = [
   "sport",
   "football",
@@ -50,10 +48,7 @@ export default function CosmicTVClient({ initialChannels }: ClientProps) {
 
   // -- State --
   const [theme, setTheme] = useState<"light" | "dark">("dark");
-
-  // Initialize with the data passed from the server
   const [allChannels, setAllChannels] = useState<Channel[]>(initialChannels);
-
   const [workingIds, setWorkingIds] = useState<string[]>([]);
   const [currentChannel, setCurrentChannel] = useState<Channel | null>(null);
   const [playerStatus, setPlayerStatus] = useState<
@@ -80,7 +75,7 @@ export default function CosmicTVClient({ initialChannels }: ClientProps) {
     }
   }, []);
 
-  // -- PLAYER LOGIC (Kept same as your code) --
+  // -- PLAYER LOGIC --
   useEffect(() => {
     if (!currentChannel || !videoRef.current) return;
     const video = videoRef.current;
@@ -89,9 +84,10 @@ export default function CosmicTVClient({ initialChannels }: ClientProps) {
 
     setPlayerStatus("loading");
 
+    // Timeout safety
     loadTimeout = setTimeout(() => {
       if (video.paused && video.readyState < 3) setPlayerStatus("error");
-    }, 15000);
+    }, 20000);
 
     const handleSuccess = () => {
       setPlayerStatus("playing");
@@ -108,34 +104,46 @@ export default function CosmicTVClient({ initialChannels }: ClientProps) {
       }
     };
 
-    const initStream = (urlToPlay: string, isProxyAttempt = false) => {
+    const initStream = () => {
       if (Hls.isSupported()) {
         if (hls) hls.destroy();
-        hls = new Hls({ enableWorker: true, lowLatencyMode: true });
+
+        // --- CUSTOM LOADER TO FIX MIXED CONTENT ---
+        // This intercepts every request. If it's HTTP, it proxies it.
+        class MixedContentLoader extends Hls.DefaultConfig.loader {
+          constructor(config: any) {
+            super(config);
+            const load = this.load.bind(this);
+            this.load = (context: any, config: any, callbacks: any) => {
+              // Check if we are on HTTPS but the stream is HTTP
+              if (
+                window.location.protocol === "https:" &&
+                context.url.startsWith("http://")
+              ) {
+                // Force CORS Proxy for this specific chunk/manifest
+                context.url = `https://corsproxy.io/?${encodeURIComponent(
+                  context.url
+                )}`;
+              }
+              load(context, config, callbacks);
+            };
+          }
+        }
+
+        hls = new Hls({
+          enableWorker: true,
+          lowLatencyMode: true,
+          // @ts-ignore - Hls.js types can be finicky with custom loaders
+          loader: MixedContentLoader,
+        });
 
         hls.on(Hls.Events.ERROR, (event, data) => {
           if (data.fatal) {
+            console.error("HLS Error", data);
             if (data.type === Hls.ErrorTypes.NETWORK_ERROR) {
-              if (
-                data.response?.code === 0 ||
-                data.response?.code === 404 ||
-                data.response?.code === 530
-              ) {
-                if (isProxyAttempt) {
-                  setPlayerStatus("dead");
-                  return;
-                }
-              }
-              if (!isProxyAttempt) {
-                setPlayerStatus("proxying");
-                hls?.destroy();
-                const proxyUrl = `https://corsproxy.io/?${encodeURIComponent(
-                  currentChannel.url
-                )}`;
-                initStream(proxyUrl, true);
-              } else {
-                setPlayerStatus("dead");
-              }
+              // If it failed even with the proxy, it's likely a dead stream (404/403)
+              setPlayerStatus("dead");
+              hls?.destroy();
             } else if (data.type === Hls.ErrorTypes.MEDIA_ERROR) {
               hls?.recoverMediaError();
             } else {
@@ -145,14 +153,26 @@ export default function CosmicTVClient({ initialChannels }: ClientProps) {
           }
         });
 
-        hls.loadSource(urlToPlay);
+        hls.loadSource(currentChannel.url);
         hls.attachMedia(video);
         hls.on(Hls.Events.MANIFEST_PARSED, () => {
           video.play().catch(() => console.log("Autoplay prevented"));
         });
         hls.on(Hls.Events.FRAG_LOADED, handleSuccess);
       } else if (video.canPlayType("application/vnd.apple.mpegurl")) {
-        video.src = urlToPlay;
+        // Safari has native HLS support.
+        // Note: Safari handles Mixed Content differently, but often fails silently on Strict mode.
+        // We try to proxy the main URL immediately for Safari.
+        let finalUrl = currentChannel.url;
+        if (
+          typeof window !== "undefined" &&
+          window.location.protocol === "https:" &&
+          finalUrl.startsWith("http://")
+        ) {
+          finalUrl = `https://corsproxy.io/?${encodeURIComponent(finalUrl)}`;
+        }
+
+        video.src = finalUrl;
         video.load();
         video.onplaying = handleSuccess;
         video.onerror = () => setPlayerStatus("error");
@@ -160,7 +180,7 @@ export default function CosmicTVClient({ initialChannels }: ClientProps) {
       }
     };
 
-    initStream(currentChannel.url, false);
+    initStream();
 
     return () => {
       if (hls) hls.destroy();
@@ -176,7 +196,6 @@ export default function CosmicTVClient({ initialChannels }: ClientProps) {
       name: "Direct Stream",
       url: search.trim(),
       group: "Input",
-      logo: "",
       score: 10000,
       isCustom: true,
       isPinned: true,
@@ -240,7 +259,7 @@ export default function CosmicTVClient({ initialChannels }: ClientProps) {
             </div>
             <div>
               <h1 className="text-lg font-bold tracking-tight leading-none">
-                Comsic TV
+                Cosmic TV
               </h1>
               <p
                 className={`text-[10px] font-bold uppercase tracking-widest pt-1 ${textSecondary}`}
@@ -330,17 +349,6 @@ export default function CosmicTVClient({ initialChannels }: ClientProps) {
                       </p>
                     </div>
                   )}
-                  {playerStatus === "proxying" && (
-                    <div className="absolute inset-0 flex flex-col items-center justify-center bg-black/90 z-20">
-                      <RefreshCcw
-                        className="animate-spin mb-4 text-blue-500"
-                        size={48}
-                      />
-                      <p className="text-sm font-bold text-white">
-                        Bypassing Geo-Block...
-                      </p>
-                    </div>
-                  )}
                   {(playerStatus === "dead" || playerStatus === "error") && (
                     <div className="absolute inset-0 flex flex-col items-center justify-center bg-zinc-900 z-20 px-4 text-center">
                       <div className="p-3 bg-red-500/10 text-red-500 rounded-full mb-3">
@@ -348,12 +356,15 @@ export default function CosmicTVClient({ initialChannels }: ClientProps) {
                       </div>
                       <h3 className="text-white font-bold mb-1">
                         {playerStatus === "dead"
-                          ? "Stream Expired"
+                          ? "Stream Unavailable"
                           : "Signal Lost"}
                       </h3>
+                      <p className="text-zinc-500 text-xs mb-4">
+                        The channel might be geo-blocked or offline.
+                      </p>
                       <button
                         onClick={() => setPlayerStatus("loading")}
-                        className="flex items-center gap-2 bg-white text-black px-5 py-2.5 rounded-full text-xs font-bold hover:scale-105 transition mt-4"
+                        className="flex items-center gap-2 bg-white text-black px-5 py-2.5 rounded-full text-xs font-bold hover:scale-105 transition"
                       >
                         <RotateCcw size={14} /> Retry
                       </button>
