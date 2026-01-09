@@ -18,7 +18,7 @@ import {
   ChevronDown,
   Plus,
   Pin,
-  Loader2, // Added loader icon
+  Loader2,
 } from "lucide-react";
 
 // --- Types & Constants ---
@@ -77,15 +77,11 @@ export default function CosmicTVClient() {
 
   // -- State --
   const [theme, setTheme] = useState<"light" | "dark">("dark");
-
-  // Playlist State
   const [allChannels, setAllChannels] = useState<Channel[]>([]);
-  const [isPlaylistLoading, setIsPlaylistLoading] = useState(true); // Loading state for fetch
-
+  const [isPlaylistLoading, setIsPlaylistLoading] = useState(true);
   const [workingIds, setWorkingIds] = useState<string[]>([]);
   const [currentChannel, setCurrentChannel] = useState<Channel | null>(null);
   const [retryTrigger, setRetryTrigger] = useState(0);
-
   const [playerStatus, setPlayerStatus] = useState<
     "idle" | "loading" | "playing" | "error" | "proxying" | "dead"
   >("idle");
@@ -117,11 +113,9 @@ export default function CosmicTVClient() {
         setIsPlaylistLoading(true);
         console.log("Fetching fresh playlist...");
 
-        // Fetch directly from browser with timestamp to bypass cache
         const res = await fetch(
           `https://iptv-org.github.io/iptv/index.m3u?t=${Date.now()}`
         );
-
         if (!res.ok) throw new Error("Failed to load playlist");
 
         const text = await res.text();
@@ -131,7 +125,6 @@ export default function CosmicTVClient() {
           logo = "",
           group = "";
 
-        // Parse Loop
         for (let i = 0; i < lines.length; i++) {
           const line = lines[i].trim();
           if (line.startsWith("#EXTINF")) {
@@ -146,13 +139,11 @@ export default function CosmicTVClient() {
             let score = 0;
             const lowerUrl = line.toLowerCase();
             const lowerName = name.toLowerCase();
-
             let isPinned = false;
             if (PINNED_KEYWORDS.some((k) => lowerName.includes(k))) {
               isPinned = true;
               score += 2000;
             }
-
             if (FAST_DOMAINS.some((d) => lowerUrl.includes(d))) score += 50;
             if (line.startsWith("https")) score += 10;
 
@@ -167,7 +158,6 @@ export default function CosmicTVClient() {
             });
           }
         }
-
         setAllChannels(parsed);
       } catch (err) {
         console.error("Failed to fetch playlist", err);
@@ -175,7 +165,6 @@ export default function CosmicTVClient() {
         setIsPlaylistLoading(false);
       }
     }
-
     fetchPlaylist();
   }, []);
 
@@ -189,11 +178,12 @@ export default function CosmicTVClient() {
 
     setPlayerStatus("loading");
 
+    // Timeout: If video hasn't started after 15s, show error
     loadTimeout = setTimeout(() => {
       if (video.paused && video.readyState < 3) {
         setPlayerStatus("error");
       }
-    }, 20000);
+    }, 15000);
 
     const handleSuccess = () => {
       setPlayerStatus("playing");
@@ -214,10 +204,9 @@ export default function CosmicTVClient() {
     const attemptPlay = () => {
       const playPromise = video.play();
       if (playPromise !== undefined) {
-        playPromise.catch((error) => {
-          console.warn("Autoplay blocked. Muting...", error);
+        playPromise.catch(() => {
           video.muted = true;
-          video.play().catch((err) => console.error("Playback failed", err));
+          video.play().catch(console.error);
         });
       }
     };
@@ -229,45 +218,89 @@ export default function CosmicTVClient() {
           hls.destroy();
         }
 
-        // --- UPDATED SMART LOADER ---
-        class SmartLoader extends Hls.DefaultConfig.loader {
+        // --- MANIFEST REWRITER LOADER ---
+        // This handles Pluto/Samsung relative paths behind a proxy
+        class ManifestRewriterLoader extends Hls.DefaultConfig.loader {
           constructor(config: any) {
             super(config);
             const load = this.load.bind(this);
             this.load = (context: any, config: any, callbacks: any) => {
               let targetUrl = context.url;
 
-              // List of domains that ALWAYS require a proxy due to CORS/Geo-blocking
-              const CORS_RESTRICTED_DOMAINS = [
+              // 1. Determine if we need to proxy
+              const CORS_DOMAINS = [
                 "pluto.tv",
                 "samsung",
                 "tubi",
                 "rakuten",
                 "amagi",
               ];
-
-              // Check if we need to proxy this request
               const needsProxy =
-                // 1. HTTPS site loading HTTP stream (Mixed content)
                 (window.location.protocol === "https:" &&
                   targetUrl.startsWith("http://")) ||
-                // 2. Known CORS blockers (like Pluto TV)
-                CORS_RESTRICTED_DOMAINS.some((d) => targetUrl.includes(d)) ||
-                // 3. Already proxied URLs cleanup (prevent double proxying)
+                CORS_DOMAINS.some((d) => targetUrl.includes(d)) ||
                 targetUrl.includes("corsproxy.io");
 
-              if (needsProxy) {
-                // Clean up any existing proxy junk if resizing happens
+              if (needsProxy && !targetUrl.includes("api.codetabs.com")) {
                 const cleanUrl = targetUrl.replace(
                   /^(https?:\/\/)(corsproxy\.io\/\?|api\.codetabs\.com\/v1\/proxy\?quest=)/,
                   ""
                 );
-
-                // Use CodeTabs Proxy
-                context.url = `https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(
+                targetUrl = `https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(
                   cleanUrl
                 )}`;
+                context.url = targetUrl;
               }
+
+              // 2. Intercept the Success Callback to rewrite M3U8 content
+              const originalOnSuccess = callbacks.onSuccess;
+              callbacks.onSuccess = (
+                response: any,
+                stats: any,
+                context: any
+              ) => {
+                // If it's a playlist (text response) and we are using the proxy
+                if (
+                  context.url.includes("api.codetabs.com") &&
+                  typeof response.data === "string"
+                ) {
+                  try {
+                    // Extract the "Real" Base URL from the Proxy URL
+                    // content.url looks like: ...proxy?quest=http://pluto.tv/folder/master.m3u8
+                    const match = context.url.match(/quest=(.*)$/);
+                    if (match && match[1]) {
+                      const realBaseUrl = decodeURIComponent(match[1]);
+
+                      // Rewrite every line in the playlist
+                      const lines = response.data.split("\n");
+                      const rewritten = lines
+                        .map((line: string) => {
+                          const trim = line.trim();
+                          // Skip empty lines or tags (#)
+                          if (!trim || trim.startsWith("#")) return line;
+
+                          // It's a URL (chunklist.m3u8 or segment.ts)
+                          // Resolve it against the Real Base URL to make it absolute
+                          try {
+                            const absoluteUrl = new URL(trim, realBaseUrl).href;
+                            // Wrap it back in the proxy
+                            return `https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(
+                              absoluteUrl
+                            )}`;
+                          } catch (e) {
+                            return line;
+                          }
+                        })
+                        .join("\n");
+
+                      response.data = rewritten;
+                    }
+                  } catch (e) {
+                    console.warn("Failed to rewrite manifest", e);
+                  }
+                }
+                originalOnSuccess(response, stats, context);
+              };
 
               load(context, config, callbacks);
             };
@@ -278,20 +311,25 @@ export default function CosmicTVClient() {
           enableWorker: true,
           lowLatencyMode: true,
           // @ts-ignore
-          loader: SmartLoader, // Use the new SmartLoader
+          loader: ManifestRewriterLoader, // Use our smart rewriter
           manifestLoadingTimeOut: 15000,
-          manifestLoadingMaxRetry: 3,
+          manifestLoadingMaxRetry: 2,
+          levelLoadingMaxRetry: 2,
+          fragLoadingMaxRetry: 2,
         });
 
+        // Error Handling
         hls.on(Hls.Events.ERROR, (event, data) => {
           if (data.fatal) {
-            console.error("HLS Error:", data);
+            // Filter out specific errors to avoid console spam
             if (data.type === Hls.ErrorTypes.NETWORK_ERROR) {
-              console.log("Network error, attempting to recover...");
+              // Recover network errors (like temporary timeouts)
+              console.log("Network error, trying to recover...");
               hls?.startLoad();
             } else if (data.type === Hls.ErrorTypes.MEDIA_ERROR) {
               hls?.recoverMediaError();
             } else {
+              // Fatal errors (DNS, 404s, etc)
               hls?.destroy();
               setPlayerStatus("dead");
               clearTimeout(loadTimeout);
@@ -308,16 +346,22 @@ export default function CosmicTVClient() {
 
         hls.on(Hls.Events.FRAG_LOADED, handleSuccess);
       } else if (video.canPlayType("application/vnd.apple.mpegurl")) {
-        // --- Safari Native HLS Logic ---
+        // --- SAFARI NATIVE HLS ---
+        // Safari handles relative paths better, but still needs the proxy for CORS
         let finalUrl = currentChannel.url;
+        const CORS_DOMAINS = [
+          "pluto.tv",
+          "samsung",
+          "tubi",
+          "rakuten",
+          "amagi",
+        ];
 
-        // Safari also needs the proxy for Pluto TV
         if (
           (typeof window !== "undefined" &&
             window.location.protocol === "https:" &&
             finalUrl.startsWith("http://")) ||
-          finalUrl.includes("pluto.tv") ||
-          finalUrl.includes("samsung")
+          CORS_DOMAINS.some((d) => finalUrl.includes(d))
         ) {
           finalUrl = `https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(
             finalUrl
@@ -615,7 +659,6 @@ export default function CosmicTVClient() {
           </div>
 
           <div className="flex-1 overflow-y-auto pr-2 custom-scrollbar space-y-2 pb-20">
-            {/* LOADING STATE FOR LIST */}
             {isPlaylistLoading ? (
               <div className="flex flex-col items-center justify-center pt-20 gap-3">
                 <Loader2
