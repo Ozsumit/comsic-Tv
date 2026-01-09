@@ -5,7 +5,6 @@ import Hls from "hls.js";
 import {
   Play,
   Search,
-  Tv,
   Disc,
   Trophy,
   Globe,
