@@ -229,26 +229,46 @@ export default function CosmicTVClient() {
           hls.destroy();
         }
 
-        class MixedContentLoader extends Hls.DefaultConfig.loader {
+        // --- UPDATED SMART LOADER ---
+        class SmartLoader extends Hls.DefaultConfig.loader {
           constructor(config: any) {
             super(config);
             const load = this.load.bind(this);
             this.load = (context: any, config: any, callbacks: any) => {
               let targetUrl = context.url;
+
+              // List of domains that ALWAYS require a proxy due to CORS/Geo-blocking
+              const CORS_RESTRICTED_DOMAINS = [
+                "pluto.tv",
+                "samsung",
+                "tubi",
+                "rakuten",
+                "amagi",
+              ];
+
+              // Check if we need to proxy this request
               const needsProxy =
+                // 1. HTTPS site loading HTTP stream (Mixed content)
                 (window.location.protocol === "https:" &&
                   targetUrl.startsWith("http://")) ||
+                // 2. Known CORS blockers (like Pluto TV)
+                CORS_RESTRICTED_DOMAINS.some((d) => targetUrl.includes(d)) ||
+                // 3. Already proxied URLs cleanup (prevent double proxying)
                 targetUrl.includes("corsproxy.io");
 
               if (needsProxy) {
+                // Clean up any existing proxy junk if resizing happens
                 const cleanUrl = targetUrl.replace(
                   /^(https?:\/\/)(corsproxy\.io\/\?|api\.codetabs\.com\/v1\/proxy\?quest=)/,
                   ""
                 );
+
+                // Use CodeTabs Proxy
                 context.url = `https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(
                   cleanUrl
                 )}`;
               }
+
               load(context, config, callbacks);
             };
           }
@@ -258,14 +278,16 @@ export default function CosmicTVClient() {
           enableWorker: true,
           lowLatencyMode: true,
           // @ts-ignore
-          loader: MixedContentLoader,
-          manifestLoadingTimeOut: 10000,
-          manifestLoadingMaxRetry: 2,
+          loader: SmartLoader, // Use the new SmartLoader
+          manifestLoadingTimeOut: 15000,
+          manifestLoadingMaxRetry: 3,
         });
 
         hls.on(Hls.Events.ERROR, (event, data) => {
           if (data.fatal) {
+            console.error("HLS Error:", data);
             if (data.type === Hls.ErrorTypes.NETWORK_ERROR) {
+              console.log("Network error, attempting to recover...");
               hls?.startLoad();
             } else if (data.type === Hls.ErrorTypes.MEDIA_ERROR) {
               hls?.recoverMediaError();
@@ -286,11 +308,16 @@ export default function CosmicTVClient() {
 
         hls.on(Hls.Events.FRAG_LOADED, handleSuccess);
       } else if (video.canPlayType("application/vnd.apple.mpegurl")) {
+        // --- Safari Native HLS Logic ---
         let finalUrl = currentChannel.url;
+
+        // Safari also needs the proxy for Pluto TV
         if (
-          typeof window !== "undefined" &&
-          window.location.protocol === "https:" &&
-          finalUrl.startsWith("http://")
+          (typeof window !== "undefined" &&
+            window.location.protocol === "https:" &&
+            finalUrl.startsWith("http://")) ||
+          finalUrl.includes("pluto.tv") ||
+          finalUrl.includes("samsung")
         ) {
           finalUrl = `https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(
             finalUrl
