@@ -6,6 +6,7 @@ import {
   Play,
   Search,
   Disc,
+  Tv,
   Trophy,
   Globe,
   Zap,
