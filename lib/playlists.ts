@@ -38,13 +38,18 @@ export async function fetchAndParsePlaylist(): Promise<Channel[]> {
   try {
     console.log("Fetching playlist from upstream...");
 
-    // UPDATED FETCH LOGIC HERE:
+    // Add a random timestamp to URL to bypass Vercel Edge Cache & GitHub Cache
+    const timestamp = Date.now();
+
     const res = await fetch(
-      // 1. Add timestamp to URL to bypass GitHub/CDN caching
-      `https://iptv-org.github.io/iptv/index.m3u?t=${Date.now()}`,
+      `https://iptv-org.github.io/iptv/index.m3u?t=${timestamp}`,
       {
-        // 2. Disable Next.js Data Cache entirely
-        cache: "no-store",
+        cache: "no-store", // 1. Tells Next.js NOT to store this in Data Cache
+        headers: {
+          "Cache-Control": "no-cache, no-store, must-revalidate", // 2. Tells upstream server not to cache
+          Pragma: "no-cache",
+          Expires: "0",
+        },
       }
     );
 
