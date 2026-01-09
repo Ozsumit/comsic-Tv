@@ -18,9 +18,42 @@ import {
   ChevronDown,
   Plus,
   Pin,
+  Loader2, // Added loader icon
 } from "lucide-react";
-// FIX: Ensure this matches your file name (singular vs plural)
-import { Channel } from "@/lib/playlists";
+
+// --- Types & Constants ---
+
+export interface Channel {
+  id: string;
+  name: string;
+  url: string;
+  logo?: string;
+  group?: string;
+  isCustom?: boolean;
+  isPinned?: boolean;
+  score: number;
+}
+
+const FAST_DOMAINS = [
+  "samsungtv",
+  "pluto.tv",
+  "rakuten",
+  "plex",
+  "tubi",
+  "roku",
+  "amagi",
+  "mux",
+];
+
+const PINNED_KEYWORDS = [
+  "fifa+",
+  "red bull",
+  "espn",
+  "sky sport",
+  "bein sport",
+  "nasa",
+  "formula 1",
+];
 
 const SPORTS_KEYWORDS = [
   "sport",
@@ -39,20 +72,18 @@ const SPORTS_KEYWORDS = [
   "golf",
 ];
 
-interface ClientProps {
-  initialChannels: Channel[];
-}
-
-export default function CosmicTVClient({ initialChannels }: ClientProps) {
+export default function CosmicTVClient() {
   const videoRef = useRef<HTMLVideoElement | null>(null);
 
   // -- State --
   const [theme, setTheme] = useState<"light" | "dark">("dark");
-  const [allChannels, setAllChannels] = useState<Channel[]>(initialChannels);
+
+  // Playlist State
+  const [allChannels, setAllChannels] = useState<Channel[]>([]);
+  const [isPlaylistLoading, setIsPlaylistLoading] = useState(true); // Loading state for fetch
+
   const [workingIds, setWorkingIds] = useState<string[]>([]);
   const [currentChannel, setCurrentChannel] = useState<Channel | null>(null);
-
-  // New state to force re-render on retry click
   const [retryTrigger, setRetryTrigger] = useState(0);
 
   const [playerStatus, setPlayerStatus] = useState<
@@ -79,6 +110,75 @@ export default function CosmicTVClient({ initialChannels }: ClientProps) {
     }
   }, []);
 
+  // -- FETCH PLAYLIST (CLIENT SIDE) --
+  useEffect(() => {
+    async function fetchPlaylist() {
+      try {
+        setIsPlaylistLoading(true);
+        console.log("Fetching fresh playlist...");
+
+        // Fetch directly from browser with timestamp to bypass cache
+        const res = await fetch(
+          `https://iptv-org.github.io/iptv/index.m3u?t=${Date.now()}`
+        );
+
+        if (!res.ok) throw new Error("Failed to load playlist");
+
+        const text = await res.text();
+        const lines = text.split("\n");
+        const parsed: Channel[] = [];
+        let name = "",
+          logo = "",
+          group = "";
+
+        // Parse Loop
+        for (let i = 0; i < lines.length; i++) {
+          const line = lines[i].trim();
+          if (line.startsWith("#EXTINF")) {
+            const n = line.match(/,(.*)$/);
+            const l = line.match(/tvg-logo="(.*?)"/);
+            const g = line.match(/group-title="(.*?)"/);
+            name = n ? n[1].trim() : "Unknown";
+            logo = l ? l[1] : "";
+            group = g ? g[1] : "Uncategorized";
+          }
+          if (line.startsWith("http")) {
+            let score = 0;
+            const lowerUrl = line.toLowerCase();
+            const lowerName = name.toLowerCase();
+
+            let isPinned = false;
+            if (PINNED_KEYWORDS.some((k) => lowerName.includes(k))) {
+              isPinned = true;
+              score += 2000;
+            }
+
+            if (FAST_DOMAINS.some((d) => lowerUrl.includes(d))) score += 50;
+            if (line.startsWith("https")) score += 10;
+
+            parsed.push({
+              id: `${name}-${i}`,
+              name,
+              logo,
+              group,
+              url: line,
+              score,
+              isPinned,
+            });
+          }
+        }
+
+        setAllChannels(parsed);
+      } catch (err) {
+        console.error("Failed to fetch playlist", err);
+      } finally {
+        setIsPlaylistLoading(false);
+      }
+    }
+
+    fetchPlaylist();
+  }, []);
+
   // -- PLAYER LOGIC --
   useEffect(() => {
     if (!currentChannel || !videoRef.current) return;
@@ -87,10 +187,8 @@ export default function CosmicTVClient({ initialChannels }: ClientProps) {
     let hls: Hls | null = null;
     let loadTimeout: NodeJS.Timeout;
 
-    // Reset status on new channel or retry
     setPlayerStatus("loading");
 
-    // 1. Timeout safety: If video hasn't started after 20s, show error
     loadTimeout = setTimeout(() => {
       if (video.paused && video.readyState < 3) {
         setPlayerStatus("error");
@@ -101,7 +199,6 @@ export default function CosmicTVClient({ initialChannels }: ClientProps) {
       setPlayerStatus("playing");
       clearTimeout(loadTimeout);
 
-      // Save working channel history
       if (!workingIds.includes(currentChannel.id)) {
         const newIds = [currentChannel.id, ...workingIds].slice(0, 50);
         setWorkingIds(newIds);
@@ -118,32 +215,26 @@ export default function CosmicTVClient({ initialChannels }: ClientProps) {
       const playPromise = video.play();
       if (playPromise !== undefined) {
         playPromise.catch((error) => {
-          console.warn("Autoplay blocked. Muting and retrying.", error);
+          console.warn("Autoplay blocked. Muting...", error);
           video.muted = true;
-          video
-            .play()
-            .catch((err) => console.error("Playback failed completely", err));
+          video.play().catch((err) => console.error("Playback failed", err));
         });
       }
     };
 
     const initStream = () => {
       if (Hls.isSupported()) {
-        // destroy existing HLS instance if exists
         if (hls) {
           // @ts-ignore
           hls.destroy();
         }
 
-        // Custom Loader to handle CORS/Mixed Content
         class MixedContentLoader extends Hls.DefaultConfig.loader {
           constructor(config: any) {
             super(config);
             const load = this.load.bind(this);
             this.load = (context: any, config: any, callbacks: any) => {
               let targetUrl = context.url;
-
-              // Logic to detect if we need to proxy (HTTPS site loading HTTP stream)
               const needsProxy =
                 (window.location.protocol === "https:" &&
                   targetUrl.startsWith("http://")) ||
@@ -154,7 +245,6 @@ export default function CosmicTVClient({ initialChannels }: ClientProps) {
                   /^(https?:\/\/)(corsproxy\.io\/\?|api\.codetabs\.com\/v1\/proxy\?quest=)/,
                   ""
                 );
-                // Use CodeTabs as a fallback proxy
                 context.url = `https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(
                   cleanUrl
                 )}`;
@@ -169,21 +259,17 @@ export default function CosmicTVClient({ initialChannels }: ClientProps) {
           lowLatencyMode: true,
           // @ts-ignore
           loader: MixedContentLoader,
-          // Add retry config to stop endless loops on dead links
           manifestLoadingTimeOut: 10000,
           manifestLoadingMaxRetry: 2,
         });
 
         hls.on(Hls.Events.ERROR, (event, data) => {
           if (data.fatal) {
-            console.error("HLS Fatal Error", data);
             if (data.type === Hls.ErrorTypes.NETWORK_ERROR) {
-              // Try to recover once, otherwise fail
               hls?.startLoad();
             } else if (data.type === Hls.ErrorTypes.MEDIA_ERROR) {
               hls?.recoverMediaError();
             } else {
-              // This handles your "ERR_NAME_NOT_RESOLVED"
               hls?.destroy();
               setPlayerStatus("dead");
               clearTimeout(loadTimeout);
@@ -200,10 +286,7 @@ export default function CosmicTVClient({ initialChannels }: ClientProps) {
 
         hls.on(Hls.Events.FRAG_LOADED, handleSuccess);
       } else if (video.canPlayType("application/vnd.apple.mpegurl")) {
-        // --- Safari Native HLS Logic ---
         let finalUrl = currentChannel.url;
-
-        // Simple proxy check for Safari
         if (
           typeof window !== "undefined" &&
           window.location.protocol === "https:" &&
@@ -216,12 +299,10 @@ export default function CosmicTVClient({ initialChannels }: ClientProps) {
 
         video.src = finalUrl;
         video.load();
-
         attemptPlay();
-
         video.onplaying = handleSuccess;
         video.onerror = () => {
-          setPlayerStatus("dead"); // Handle dead links in Safari
+          setPlayerStatus("dead");
           clearTimeout(loadTimeout);
         };
       }
@@ -231,19 +312,17 @@ export default function CosmicTVClient({ initialChannels }: ClientProps) {
 
     return () => {
       if (hls) hls.destroy();
-      video.removeAttribute("src"); // Clear source
-      video.load(); // Reset video element
+      video.removeAttribute("src");
+      video.load();
       clearTimeout(loadTimeout);
     };
-  }, [currentChannel, retryTrigger]); // Added retryTrigger to dependencies
+  }, [currentChannel, retryTrigger]);
 
-  // -- Retry Handler --
   const handleRetry = () => {
     setPlayerStatus("loading");
-    setRetryTrigger((prev) => prev + 1); // Forces useEffect to re-run
+    setRetryTrigger((prev) => prev + 1);
   };
 
-  // -- Direct URL Paste --
   const handleUrlPaste = () => {
     if (!search.startsWith("http")) return;
     const newChannel: Channel = {
@@ -260,7 +339,6 @@ export default function CosmicTVClient({ initialChannels }: ClientProps) {
     setSearch("");
   };
 
-  // -- SORTING & FILTERING --
   const displayList = useMemo(() => {
     let list = allChannels;
     if (viewMode === "sports") {
@@ -284,7 +362,6 @@ export default function CosmicTVClient({ initialChannels }: ClientProps) {
     });
   }, [allChannels, viewMode, search, workingIds]);
 
-  // -- HELPERS --
   const isUrlInput = search.startsWith("http");
   const isDark = theme === "dark";
   const bgMain = isDark ? "bg-[#09090b]" : "bg-[#f4f4f5]";
@@ -299,7 +376,6 @@ export default function CosmicTVClient({ initialChannels }: ClientProps) {
     <div
       className={`min-h-screen font-sans transition-colors duration-200 ${bgMain} ${textPrimary}`}
     >
-      {/* HEADER */}
       <header
         className={`sticky top-0 z-50 backdrop-blur-xl border-b py-4 px-4 lg:px-8 ${bgHeader}`}
       >
@@ -319,14 +395,7 @@ export default function CosmicTVClient({ initialChannels }: ClientProps) {
               <p
                 className={`text-[10px] font-bold uppercase tracking-widest pt-1 ${textSecondary}`}
               >
-                Subset of{" "}
-                <a
-                  href="https://cmoon.sumit.info.np"
-                  target="_blank"
-                  rel="noreferrer"
-                >
-                  Crescent Moon
-                </a>
+                Client Side Mode
               </p>
             </div>
           </div>
@@ -375,11 +444,9 @@ export default function CosmicTVClient({ initialChannels }: ClientProps) {
         </div>
       </header>
 
-      {/* BODY */}
       <div className="max-w-[1600px] mx-auto grid grid-cols-1 lg:grid-cols-12 gap-6 p-4 lg:p-8">
         <div className="lg:col-span-8 space-y-4">
           <div className="sticky top-24 z-10">
-            {/* PLAYER CONTAINER */}
             <div
               className={`relative aspect-video rounded-3xl overflow-hidden shadow-2xl transition-all ${
                 isDark
@@ -417,7 +484,6 @@ export default function CosmicTVClient({ initialChannels }: ClientProps) {
                       <p className="text-zinc-500 text-xs mb-4">
                         The channel might be geo-blocked or offline.
                       </p>
-                      {/* FIX: Use handleRetry to actually trigger re-render */}
                       <button
                         onClick={handleRetry}
                         className="flex items-center gap-2 bg-white text-black px-5 py-2.5 rounded-full text-xs font-bold hover:scale-105 transition"
@@ -445,7 +511,6 @@ export default function CosmicTVClient({ initialChannels }: ClientProps) {
               )}
             </div>
 
-            {/* CURRENT INFO CARD */}
             <div
               className={`mt-4 p-5 rounded-3xl border flex items-center justify-between ${bgCard} ${
                 isDark ? "border-zinc-800" : "border-zinc-200"
@@ -486,7 +551,6 @@ export default function CosmicTVClient({ initialChannels }: ClientProps) {
           </div>
         </div>
 
-        {/* SIDEBAR */}
         <div className="lg:col-span-4 flex flex-col h-[calc(100vh-140px)] sticky top-24">
           <div
             className={`p-2 rounded-2xl border mb-4 flex items-center gap-3 ${bgCard} ${
@@ -524,106 +588,121 @@ export default function CosmicTVClient({ initialChannels }: ClientProps) {
           </div>
 
           <div className="flex-1 overflow-y-auto pr-2 custom-scrollbar space-y-2 pb-20">
-            {displayList.slice(0, limit).map((channel) => {
-              const isActive = currentChannel?.id === channel.id;
-              const isVerified =
-                workingIds.includes(channel.id) || channel.score >= 50;
-              return (
-                <button
-                  key={channel.id}
-                  onClick={() => setCurrentChannel(channel)}
-                  className={`w-full group relative flex items-center gap-4 p-3 rounded-2xl text-left transition-all duration-200 border ${
-                    isActive
-                      ? "bg-blue-600 border-blue-500 shadow-lg shadow-blue-900/20"
-                      : `${bgCard} ${
-                          isDark
-                            ? "border-zinc-800 hover:border-zinc-600"
-                            : "border-zinc-200 hover:border-zinc-300"
-                        } hover:scale-[1.01]`
-                  }`}
-                >
-                  <div
-                    className={`w-12 h-12 rounded-xl flex items-center justify-center overflow-hidden shrink-0 border ${
-                      isActive
-                        ? "bg-blue-500/20 border-blue-400/30"
-                        : `${
-                            isDark
-                              ? "bg-zinc-900 border-zinc-800"
-                              : "bg-zinc-50 border-zinc-200"
-                          }`
-                    }`}
-                  >
-                    {channel.logo ? (
-                      <img
-                        src={channel.logo}
-                        alt=""
-                        className="w-full h-full object-contain p-1"
-                        loading="lazy"
-                        onError={(e) =>
-                          (e.currentTarget.style.display = "none")
-                        }
-                      />
-                    ) : (
-                      <span
-                        className={`text-xs font-bold ${
-                          isActive ? "text-white/70" : textSecondary
-                        }`}
-                      >
-                        TV
-                      </span>
-                    )}
-                  </div>
-                  <div className="flex-1 min-w-0">
-                    <div className="flex items-center gap-2">
-                      <h3
-                        className={`text-sm font-bold truncate ${
-                          isActive ? "text-white" : textPrimary
-                        }`}
-                      >
-                        {channel.name}
-                      </h3>
-                      {channel.isPinned && (
-                        <Pin
-                          size={12}
-                          className={`fill-current ${
-                            isActive ? "text-white" : "text-blue-500"
-                          }`}
-                        />
-                      )}
-                    </div>
-                    <p
-                      className={`text-[10px] font-bold uppercase tracking-wider truncate mt-0.5 ${
-                        isActive ? "text-blue-100" : textSecondary
+            {/* LOADING STATE FOR LIST */}
+            {isPlaylistLoading ? (
+              <div className="flex flex-col items-center justify-center pt-20 gap-3">
+                <Loader2
+                  className={`animate-spin ${textSecondary}`}
+                  size={32}
+                />
+                <p className={`text-xs font-bold ${textSecondary}`}>
+                  Loading Playlist...
+                </p>
+              </div>
+            ) : (
+              <>
+                {displayList.slice(0, limit).map((channel) => {
+                  const isActive = currentChannel?.id === channel.id;
+                  const isVerified =
+                    workingIds.includes(channel.id) || channel.score >= 50;
+                  return (
+                    <button
+                      key={channel.id}
+                      onClick={() => setCurrentChannel(channel)}
+                      className={`w-full group relative flex items-center gap-4 p-3 rounded-2xl text-left transition-all duration-200 border ${
+                        isActive
+                          ? "bg-blue-600 border-blue-500 shadow-lg shadow-blue-900/20"
+                          : `${bgCard} ${
+                              isDark
+                                ? "border-zinc-800 hover:border-zinc-600"
+                                : "border-zinc-200 hover:border-zinc-300"
+                            } hover:scale-[1.01]`
                       }`}
                     >
-                      {channel.group}
-                    </p>
-                  </div>
-                  <div className={`${isActive ? "text-white" : ""}`}>
-                    {channel.isCustom ? (
-                      <Zap
-                        size={16}
-                        className="text-yellow-500 fill-yellow-500"
-                      />
-                    ) : isVerified ? (
-                      <Wifi size={16} className="text-emerald-500" />
-                    ) : (
-                      <Radio size={16} className="text-zinc-500" />
-                    )}
-                  </div>
+                      <div
+                        className={`w-12 h-12 rounded-xl flex items-center justify-center overflow-hidden shrink-0 border ${
+                          isActive
+                            ? "bg-blue-500/20 border-blue-400/30"
+                            : `${
+                                isDark
+                                  ? "bg-zinc-900 border-zinc-800"
+                                  : "bg-zinc-50 border-zinc-200"
+                              }`
+                        }`}
+                      >
+                        {channel.logo ? (
+                          <img
+                            src={channel.logo}
+                            alt=""
+                            className="w-full h-full object-contain p-1"
+                            loading="lazy"
+                            onError={(e) =>
+                              (e.currentTarget.style.display = "none")
+                            }
+                          />
+                        ) : (
+                          <span
+                            className={`text-xs font-bold ${
+                              isActive ? "text-white/70" : textSecondary
+                            }`}
+                          >
+                            TV
+                          </span>
+                        )}
+                      </div>
+                      <div className="flex-1 min-w-0">
+                        <div className="flex items-center gap-2">
+                          <h3
+                            className={`text-sm font-bold truncate ${
+                              isActive ? "text-white" : textPrimary
+                            }`}
+                          >
+                            {channel.name}
+                          </h3>
+                          {channel.isPinned && (
+                            <Pin
+                              size={12}
+                              className={`fill-current ${
+                                isActive ? "text-white" : "text-blue-500"
+                              }`}
+                            />
+                          )}
+                        </div>
+                        <p
+                          className={`text-[10px] font-bold uppercase tracking-wider truncate mt-0.5 ${
+                            isActive ? "text-blue-100" : textSecondary
+                          }`}
+                        >
+                          {channel.group}
+                        </p>
+                      </div>
+                      <div className={`${isActive ? "text-white" : ""}`}>
+                        {channel.isCustom ? (
+                          <Zap
+                            size={16}
+                            className="text-yellow-500 fill-yellow-500"
+                          />
+                        ) : isVerified ? (
+                          <Wifi size={16} className="text-emerald-500" />
+                        ) : (
+                          <Radio size={16} className="text-zinc-500" />
+                        )}
+                      </div>
+                    </button>
+                  );
+                })}
+                <button
+                  onClick={() => setLimit((l) => l + 50)}
+                  className={`w-full py-4 mt-2 text-xs font-bold rounded-xl flex items-center justify-center gap-2 transition-colors ${
+                    isDark
+                      ? "bg-zinc-900 hover:bg-zinc-800 text-zinc-400"
+                      : "bg-white hover:bg-zinc-50 text-zinc-500 border border-zinc-200"
+                  }`}
+                >
+                  <ChevronDown size={14} /> Load More
                 </button>
-              );
-            })}
-            <button
-              onClick={() => setLimit((l) => l + 50)}
-              className={`w-full py-4 mt-2 text-xs font-bold rounded-xl flex items-center justify-center gap-2 transition-colors ${
-                isDark
-                  ? "bg-zinc-900 hover:bg-zinc-800 text-zinc-400"
-                  : "bg-white hover:bg-zinc-50 text-zinc-500 border border-zinc-200"
-              }`}
-            >
-              <ChevronDown size={14} /> Load More
-            </button>
+              </>
+            )}
           </div>
         </div>
       </div>
