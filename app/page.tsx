@@ -13,10 +13,13 @@ import {
   RotateCcw,
   Moon,
   Sun,
-  SignalHigh,
-  SignalLow,
-  XCircle,
+  Wifi,
+  Radio,
+  AlertTriangle,
   ChevronDown,
+  RefreshCcw,
+  Plus,
+  Pin, // New icon
 } from "lucide-react";
 
 // --- TYPES ---
@@ -27,6 +30,7 @@ interface Channel {
   logo?: string;
   group?: string;
   isCustom?: boolean;
+  isPinned?: boolean; // New flag for dynamic pinning
   score: number;
 }
 
@@ -39,10 +43,24 @@ const FAST_DOMAINS = [
   "tubi",
   "roku",
   "amagi",
+  "mux",
 ];
+
+// 1. DEFINE WHAT YOU WANT TO AUTO-PIN HERE
+// The app will scan the 30,000+ channels and hunt for these words.
+const PINNED_KEYWORDS = [
+  "fifa+",
+  ,
+  "red bull",
+  "espn",
+  "sky sport",
+  "bein sport",
+  "nasa",
+  "formula 1",
+];
+
 const SPORTS_KEYWORDS = [
   "sport",
-  "espn",
   "football",
   "soccer",
   "racing",
@@ -53,48 +71,39 @@ const SPORTS_KEYWORDS = [
   "wwe",
   "league",
   "fox",
-  "sky",
-  "bein",
   "arena",
+  "fight",
+  "golf",
 ];
 
-const CUSTOM_CHANNELS: Partial<Channel>[] = [
-  {
-    name: "Red Bull TV",
-    url: "https://rbmn-live.akamaized.net/hls/live/590964/BoRB-AT/master.m3u8",
-    logo: "https://upload.wikimedia.org/wikipedia/en/thumb/f/f5/RedBullTVLogo.svg/1200px-RedBullTVLogo.svg.png",
-    group: "Extreme Sports",
-    isCustom: true,
-  },
-];
+// Keep Custom Channels if you have private links, otherwise leave empty
+const CUSTOM_CHANNELS: Partial<Channel>[] = [];
 
 export default function ComsicTV() {
   const videoRef = useRef<HTMLVideoElement | null>(null);
 
   // -- State --
-  // Defaulting to dark, but with high contrast colors now
-  const [theme, setTheme] = useState<"dark" | "light">("dark");
+  const [theme, setTheme] = useState<"light" | "dark">("dark");
   const [allChannels, setAllChannels] = useState<Channel[]>([]);
   const [workingIds, setWorkingIds] = useState<string[]>([]);
   const [currentChannel, setCurrentChannel] = useState<Channel | null>(null);
+
   const [playerStatus, setPlayerStatus] = useState<
-    "idle" | "loading" | "playing" | "error"
+    "idle" | "loading" | "playing" | "error" | "proxying" | "dead"
   >("idle");
 
-  // -- UI State --
   const [viewMode, setViewMode] = useState<"sports" | "all">("sports");
   const [search, setSearch] = useState("");
   const [limit, setLimit] = useState(50);
   const [appLoading, setAppLoading] = useState(true);
 
-  // -- Theme Handler --
+  // -- Theme --
   useEffect(() => {
-    // This is just for body background handling if needed
     document.body.style.backgroundColor =
       theme === "dark" ? "#09090b" : "#f4f4f5";
   }, [theme]);
 
-  // -- Data Fetching --
+  // -- LOAD & SCAN PLAYLIST --
   useEffect(() => {
     const saved = localStorage.getItem("swiss_working_channels");
     if (saved) setWorkingIds(JSON.parse(saved));
@@ -104,7 +113,6 @@ export default function ComsicTV() {
         const res = await fetch("https://iptv-org.github.io/iptv/index.m3u");
         const text = await res.text();
         const lines = text.split("\n");
-
         const parsed: Channel[] = [];
         let name = "",
           logo = "",
@@ -123,8 +131,19 @@ export default function ComsicTV() {
           if (line.startsWith("http")) {
             let score = 0;
             const lowerUrl = line.toLowerCase();
+            const lowerName = name.toLowerCase();
+
+            // 2. DYNAMIC PINNING LOGIC
+            let isPinned = false;
+            if (PINNED_KEYWORDS.some((k) => lowerName.includes(k))) {
+              isPinned = true;
+              score += 2000; // Massive boost to float to top
+            }
+
+            // Standard Scoring
             if (FAST_DOMAINS.some((d) => lowerUrl.includes(d))) score += 50;
             if (line.startsWith("https")) score += 10;
+
             parsed.push({
               id: `${name}-${i}`,
               name,
@@ -132,9 +151,12 @@ export default function ComsicTV() {
               group,
               url: line,
               score,
+              isPinned,
             });
           }
         }
+
+        // Merge hardcoded customs with parsed
         const customs: Channel[] = CUSTOM_CHANNELS.map((c, i) => ({
           id: `custom-${i}`,
           name: c.name!,
@@ -142,8 +164,9 @@ export default function ComsicTV() {
           logo: c.logo || "",
           group: c.group || "Custom",
           isCustom: true,
-          score: 1000,
+          score: 5000, // Highest priority
         }));
+
         setAllChannels([...customs, ...parsed]);
       } catch (err) {
         console.error(err);
@@ -154,18 +177,18 @@ export default function ComsicTV() {
     loadPlaylist();
   }, []);
 
-  // -- Player Logic --
+  // -- PLAYER LOGIC --
   useEffect(() => {
     if (!currentChannel || !videoRef.current) return;
     const video = videoRef.current;
-    let hls: Hls;
+    let hls: Hls | null = null;
     let loadTimeout: NodeJS.Timeout;
 
     setPlayerStatus("loading");
 
     loadTimeout = setTimeout(() => {
       if (video.paused && video.readyState < 3) setPlayerStatus("error");
-    }, 10000);
+    }, 15000);
 
     const handleSuccess = () => {
       setPlayerStatus("playing");
@@ -177,25 +200,57 @@ export default function ComsicTV() {
       }
     };
 
-    if (Hls.isSupported()) {
-      hls = new Hls();
-      hls.loadSource(currentChannel.url);
-      hls.attachMedia(video);
-      hls.on(Hls.Events.MANIFEST_PARSED, () => video.play().catch(() => {}));
-      hls.on(Hls.Events.FRAG_LOADED, handleSuccess);
-      hls.on(Hls.Events.ERROR, (e, data) => {
-        if (data.fatal) {
-          setPlayerStatus("error");
-          clearTimeout(loadTimeout);
-        }
-      });
-    } else {
-      video.src = currentChannel.url;
-      video.load();
-      video.onplaying = handleSuccess;
-      video.onerror = () => setPlayerStatus("error");
-      video.play().catch(() => {});
-    }
+    const initStream = (urlToPlay: string, isProxyAttempt = false) => {
+      if (Hls.isSupported()) {
+        if (hls) hls.destroy();
+        hls = new Hls({ enableWorker: true, lowLatencyMode: true });
+
+        hls.on(Hls.Events.ERROR, (event, data) => {
+          if (data.fatal) {
+            if (data.type === Hls.ErrorTypes.NETWORK_ERROR) {
+              if (
+                data.response?.code === 0 ||
+                data.response?.code === 404 ||
+                data.response?.code === 530
+              ) {
+                if (isProxyAttempt) {
+                  setPlayerStatus("dead");
+                  return;
+                }
+              }
+              if (!isProxyAttempt) {
+                setPlayerStatus("proxying");
+                hls?.destroy();
+                const proxyUrl = `https://corsproxy.io/?${encodeURIComponent(
+                  currentChannel.url
+                )}`;
+                initStream(proxyUrl, true);
+              } else {
+                setPlayerStatus("dead");
+              }
+            } else if (data.type === Hls.ErrorTypes.MEDIA_ERROR) {
+              hls?.recoverMediaError();
+            } else {
+              hls?.destroy();
+              setPlayerStatus("error");
+            }
+          }
+        });
+
+        hls.loadSource(urlToPlay);
+        hls.attachMedia(video);
+        hls.on(Hls.Events.MANIFEST_PARSED, () => video.play().catch(() => {}));
+        hls.on(Hls.Events.FRAG_LOADED, handleSuccess);
+      } else if (video.canPlayType("application/vnd.apple.mpegurl")) {
+        video.src = urlToPlay;
+        video.load();
+        video.onplaying = handleSuccess;
+        video.onerror = () => setPlayerStatus("error");
+        video.play().catch(() => {});
+      }
+    };
+
+    initStream(currentChannel.url, false);
 
     return () => {
       if (hls) hls.destroy();
@@ -203,65 +258,66 @@ export default function ComsicTV() {
     };
   }, [currentChannel]);
 
-  // -- Sorting --
+  // -- Direct URL Paste --
+  const handleUrlPaste = () => {
+    if (!search.startsWith("http")) return;
+    const newChannel: Channel = {
+      id: `pasted-${Date.now()}`,
+      name: "Direct Stream",
+      url: search.trim(),
+      group: "Input",
+      logo: "",
+      score: 10000,
+      isCustom: true,
+    };
+    setAllChannels([newChannel, ...allChannels]);
+    setCurrentChannel(newChannel);
+    setSearch("");
+  };
+
+  // -- SORTING & FILTERING --
   const displayList = useMemo(() => {
     let list = allChannels;
+
+    // 1. Filter
     if (viewMode === "sports") {
       list = list.filter((c) => {
-        if (c.isCustom) return true;
+        if (c.isCustom || c.isPinned) return true; // Always show pinned/custom in sports view
         const txt = (c.name + c.group).toLowerCase();
         return SPORTS_KEYWORDS.some((k) => txt.includes(k));
       });
     }
-    if (search)
+    if (search && !search.startsWith("http"))
       list = list.filter((c) =>
         c.name.toLowerCase().includes(search.toLowerCase())
       );
 
+    // 2. Sort
     return list.sort((a, b) => {
       let scoreA = a.score;
       let scoreB = b.score;
+      // History Boost
       if (workingIds.includes(a.id)) scoreA += 100;
       if (workingIds.includes(b.id)) scoreB += 100;
       return scoreB - scoreA;
     });
   }, [allChannels, viewMode, search, workingIds]);
 
-  // -- Helpers --
-  const getSignalIcon = (channel: Channel) => {
-    const isVerified = workingIds.includes(channel.id) || channel.score >= 50;
-    if (channel.isCustom)
-      return <Zap size={16} className="text-yellow-500 fill-yellow-500" />;
-    if (isVerified)
-      return <SignalHigh size={16} className="text-emerald-500" />;
-    return <SignalLow size={16} className="text-zinc-500" />;
-  };
-
-  // --- STYLES CONFIG ---
+  // -- HELPERS --
+  const isUrlInput = search.startsWith("http");
   const isDark = theme === "dark";
-
-  // Backgrounds
   const bgMain = isDark ? "bg-[#09090b]" : "bg-[#f4f4f5]";
   const bgCard = isDark ? "bg-[#18181b]" : "bg-white";
-  const bgInput = isDark ? "bg-[#27272a]" : "bg-zinc-100";
   const bgHeader = isDark
     ? "bg-[#09090b]/80 border-zinc-800"
     : "bg-white/80 border-zinc-200";
-
-  // Borders
-  const borderBase = isDark ? "border-zinc-800" : "border-zinc-200";
-  const borderHover = isDark ? "border-zinc-600" : "border-zinc-300";
-
-  // Text
   const textPrimary = isDark ? "text-white" : "text-zinc-900";
   const textSecondary = isDark ? "text-zinc-400" : "text-zinc-500";
-  const textMuted = isDark ? "text-zinc-600" : "text-zinc-400";
 
   return (
     <div
       className={`min-h-screen font-sans transition-colors duration-200 ${bgMain} ${textPrimary}`}
     >
-      {/* HEADER */}
       <header
         className={`sticky top-0 z-50 backdrop-blur-xl border-b py-4 px-4 lg:px-8 ${bgHeader}`}
       >
@@ -281,11 +337,14 @@ export default function ComsicTV() {
               <p
                 className={`text-[10px] font-bold uppercase tracking-widest pt-1 ${textSecondary}`}
               >
-                IPTV Player
+                Subset of{" "}
+                <a href="https://cmoon.sumit.info.np" target="_blank">
+                  {" "}
+                  Crescent Moon
+                </a>
               </p>
             </div>
           </div>
-
           <div
             className={`flex p-1 rounded-full border ${
               isDark
@@ -318,7 +377,6 @@ export default function ComsicTV() {
               <Globe size={14} /> All
             </button>
           </div>
-
           <button
             onClick={() => setTheme(isDark ? "light" : "dark")}
             className={`p-2.5 rounded-full border transition-all ${
@@ -333,10 +391,8 @@ export default function ComsicTV() {
       </header>
 
       <div className="max-w-[1600px] mx-auto grid grid-cols-1 lg:grid-cols-12 gap-6 p-4 lg:p-8">
-        {/* --- LEFT: PLAYER --- */}
         <div className="lg:col-span-8 space-y-4">
           <div className="sticky top-24 z-10">
-            {/* Video Box */}
             <div
               className={`relative aspect-video rounded-3xl overflow-hidden shadow-2xl transition-all ${
                 isDark
@@ -352,25 +408,53 @@ export default function ComsicTV() {
                     autoPlay
                     className="w-full h-full object-contain"
                   />
-
                   {playerStatus === "loading" && (
                     <div className="absolute inset-0 flex flex-col items-center justify-center bg-black/80 z-20">
                       <div className="w-12 h-12 border-4 border-zinc-700 border-t-white rounded-full animate-spin mb-4" />
-                      <p className="text-sm font-bold text-white tracking-wide">
+                      <p className="text-sm font-bold text-white">
                         Connecting...
                       </p>
                     </div>
                   )}
-
+                  {playerStatus === "proxying" && (
+                    <div className="absolute inset-0 flex flex-col items-center justify-center bg-black/90 z-20">
+                      <RefreshCcw
+                        className="animate-spin mb-4 text-blue-500"
+                        size={48}
+                      />
+                      <p className="text-sm font-bold text-white">
+                        Bypassing Geo-Block...
+                      </p>
+                    </div>
+                  )}
+                  {playerStatus === "dead" && (
+                    <div className="absolute inset-0 flex flex-col items-center justify-center bg-zinc-900 z-20 px-4 text-center">
+                      <div className="p-3 bg-red-500/10 text-red-500 rounded-full mb-3">
+                        <AlertTriangle size={32} />
+                      </div>
+                      <h3 className="text-white font-bold mb-1">
+                        Stream Expired
+                      </h3>
+                      <p className="text-zinc-500 text-xs mb-4">
+                        Try searching for another link for this channel.
+                      </p>
+                      <button
+                        onClick={() => setPlayerStatus("loading")}
+                        className="flex items-center gap-2 bg-white text-black px-5 py-2.5 rounded-full text-xs font-bold hover:scale-105 transition"
+                      >
+                        <RotateCcw size={14} /> Retry
+                      </button>
+                    </div>
+                  )}
                   {playerStatus === "error" && (
                     <div className="absolute inset-0 flex flex-col items-center justify-center bg-zinc-900 z-20 px-4 text-center">
                       <div className="p-3 bg-red-500/10 text-red-500 rounded-full mb-3">
-                        <XCircle size={32} />
+                        <AlertTriangle size={32} />
                       </div>
                       <h3 className="text-white font-bold mb-1">Signal Lost</h3>
                       <button
                         onClick={() => setPlayerStatus("loading")}
-                        className="mt-4 flex items-center gap-2 bg-white text-black px-5 py-2.5 rounded-full text-xs font-bold hover:scale-105 transition"
+                        className="flex items-center gap-2 bg-white text-black px-5 py-2.5 rounded-full text-xs font-bold hover:scale-105 transition"
                       >
                         <RotateCcw size={14} /> Retry
                       </button>
@@ -395,9 +479,10 @@ export default function ComsicTV() {
               )}
             </div>
 
-            {/* Meta Card */}
             <div
-              className={`mt-4 p-5 rounded-3xl border flex items-center justify-between ${bgCard} ${borderBase}`}
+              className={`mt-4 p-5 rounded-3xl border flex items-center justify-between ${bgCard} ${
+                isDark ? "border-zinc-800" : "border-zinc-200"
+              }`}
             >
               <div>
                 <h2
@@ -417,33 +502,28 @@ export default function ComsicTV() {
                       className={`w-1.5 h-1.5 rounded-full ${
                         playerStatus === "playing"
                           ? "bg-emerald-500"
+                          : playerStatus === "proxying"
+                          ? "bg-blue-500 animate-pulse"
                           : "bg-zinc-500"
                       }`}
                     />
-                    {playerStatus === "playing" ? "Live" : "Offline"}
+                    {playerStatus === "playing"
+                      ? "Live"
+                      : playerStatus === "proxying"
+                      ? "Unblocking..."
+                      : "Offline"}
                   </div>
-                  {currentChannel?.group && (
-                    <div
-                      className={`px-2 py-1 rounded-md text-[10px] font-bold uppercase tracking-wider ${
-                        isDark
-                          ? "bg-zinc-800 text-zinc-400"
-                          : "bg-zinc-100 text-zinc-500"
-                      }`}
-                    >
-                      {currentChannel.group}
-                    </div>
-                  )}
                 </div>
               </div>
             </div>
           </div>
         </div>
 
-        {/* --- RIGHT: LIST --- */}
         <div className="lg:col-span-4 flex flex-col h-[calc(100vh-140px)] sticky top-24">
-          {/* Search Box */}
           <div
-            className={`p-2 rounded-2xl border mb-4 flex items-center gap-3 ${bgCard} ${borderBase}`}
+            className={`p-2 rounded-2xl border mb-4 flex items-center gap-3 ${bgCard} ${
+              isDark ? "border-zinc-800" : "border-zinc-200"
+            }`}
           >
             <div
               className={`p-2 rounded-xl ${
@@ -452,18 +532,29 @@ export default function ComsicTV() {
                   : "bg-zinc-100 text-zinc-400"
               }`}
             >
-              <Search size={18} />
+              {isUrlInput ? (
+                <Plus size={18} className="text-emerald-500" />
+              ) : (
+                <Search size={18} />
+              )}
             </div>
             <input
               type="text"
-              placeholder="Find channel..."
+              placeholder="Search channel OR Paste .m3u8 link..."
               value={search}
               onChange={(e) => setSearch(e.target.value)}
-              className={`bg-transparent w-full outline-none text-sm font-semibold placeholder:${textMuted} ${textPrimary}`}
+              className={`bg-transparent w-full outline-none text-sm font-semibold placeholder:${textSecondary} ${textPrimary}`}
             />
+            {isUrlInput && (
+              <button
+                onClick={handleUrlPaste}
+                className="bg-emerald-500 hover:bg-emerald-600 text-white px-3 py-1.5 rounded-lg text-xs font-bold whitespace-nowrap transition-colors"
+              >
+                Play
+              </button>
+            )}
           </div>
 
-          {/* Channels List */}
           <div className="flex-1 overflow-y-auto pr-2 custom-scrollbar space-y-2 pb-20">
             {appLoading ? (
               <div className="flex flex-col items-center justify-center py-20">
@@ -478,25 +569,24 @@ export default function ComsicTV() {
               <>
                 {displayList.slice(0, limit).map((channel) => {
                   const isActive = currentChannel?.id === channel.id;
-
+                  const isVerified =
+                    workingIds.includes(channel.id) || channel.score >= 50;
                   return (
                     <button
                       key={channel.id}
                       onClick={() => setCurrentChannel(channel)}
-                      className={`
-                        w-full group relative flex items-center gap-4 p-3 rounded-2xl text-left transition-all duration-200 border
-                        ${
-                          isActive
-                            ? "bg-blue-600 border-blue-500 shadow-lg shadow-blue-900/20"
-                            : `${bgCard} ${borderBase} hover:${borderHover} hover:scale-[1.01]`
-                        }
-                      `}
+                      className={`w-full group relative flex items-center gap-4 p-3 rounded-2xl text-left transition-all duration-200 border ${
+                        isActive
+                          ? "bg-blue-600 border-blue-500 shadow-lg shadow-blue-900/20"
+                          : `${bgCard} ${
+                              isDark
+                                ? "border-zinc-800 hover:border-zinc-600"
+                                : "border-zinc-200 hover:border-zinc-300"
+                            } hover:scale-[1.01]`
+                      }`}
                     >
-                      {/* Logo Area */}
                       <div
-                        className={`
-                        w-12 h-12 rounded-xl flex items-center justify-center overflow-hidden shrink-0 border
-                        ${
+                        className={`w-12 h-12 rounded-xl flex items-center justify-center overflow-hidden shrink-0 border ${
                           isActive
                             ? "bg-blue-500/20 border-blue-400/30"
                             : `${
@@ -504,8 +594,7 @@ export default function ComsicTV() {
                                   ? "bg-zinc-900 border-zinc-800"
                                   : "bg-zinc-50 border-zinc-200"
                               }`
-                        }
-                      `}
+                        }`}
                       >
                         {channel.logo ? (
                           <img
@@ -519,42 +608,55 @@ export default function ComsicTV() {
                         ) : (
                           <span
                             className={`text-xs font-bold ${
-                              isActive ? "text-white/70" : textMuted
+                              isActive ? "text-white/70" : textSecondary
                             }`}
                           >
                             TV
                           </span>
                         )}
                       </div>
-
-                      {/* Info Area */}
                       <div className="flex-1 min-w-0">
-                        <h3
-                          className={`text-sm font-bold truncate ${
-                            isActive ? "text-white" : textPrimary
-                          }`}
-                        >
-                          {channel.name}
-                        </h3>
-                        <div className="flex items-center gap-2 mt-0.5">
-                          <p
-                            className={`text-[10px] font-bold uppercase tracking-wider truncate ${
-                              isActive ? "text-blue-100" : textSecondary
+                        <div className="flex items-center gap-2">
+                          <h3
+                            className={`text-sm font-bold truncate ${
+                              isActive ? "text-white" : textPrimary
                             }`}
                           >
-                            {channel.group}
-                          </p>
+                            {channel.name}
+                          </h3>
+                          {/* SHOW PIN ICON IF PINNED */}
+                          {channel.isPinned && (
+                            <Pin
+                              size={12}
+                              className={`fill-current ${
+                                isActive ? "text-white" : "text-blue-500"
+                              }`}
+                            />
+                          )}
                         </div>
+                        <p
+                          className={`text-[10px] font-bold uppercase tracking-wider truncate mt-0.5 ${
+                            isActive ? "text-blue-100" : textSecondary
+                          }`}
+                        >
+                          {channel.group}
+                        </p>
                       </div>
-
-                      {/* Right Icon (Signal) */}
                       <div className={`${isActive ? "text-white" : ""}`}>
-                        {getSignalIcon(channel)}
+                        {channel.isCustom ? (
+                          <Zap
+                            size={16}
+                            className="text-yellow-500 fill-yellow-500"
+                          />
+                        ) : isVerified ? (
+                          <Wifi size={16} className="text-emerald-500" />
+                        ) : (
+                          <Radio size={16} className="text-zinc-500" />
+                        )}
                       </div>
                     </button>
                   );
                 })}
-
                 <button
                   onClick={() => setLimit((l) => l + 50)}
                   className={`w-full py-4 mt-2 text-xs font-bold rounded-xl flex items-center justify-center gap-2 transition-colors ${
