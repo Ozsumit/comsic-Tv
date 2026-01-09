@@ -1,4 +1,5 @@
 // lib/playlist.ts
+
 export interface Channel {
   id: string;
   name: string;
@@ -36,11 +37,16 @@ const CUSTOM_CHANNELS: Partial<Channel>[] = [];
 export async function fetchAndParsePlaylist(): Promise<Channel[]> {
   try {
     console.log("Fetching playlist from upstream...");
-    // Next.js fetches are cached by default.
-    // This runs at build time.
-    const res = await fetch("https://iptv-org.github.io/iptv/index.m3u", {
-      next: { revalidate: 3600 }, // Optional: Re-fetch every hour if using ISR
-    });
+
+    // UPDATED FETCH LOGIC HERE:
+    const res = await fetch(
+      // 1. Add timestamp to URL to bypass GitHub/CDN caching
+      `https://iptv-org.github.io/iptv/index.m3u?t=${Date.now()}`,
+      {
+        // 2. Disable Next.js Data Cache entirely
+        cache: "no-store",
+      }
+    );
 
     if (!res.ok) throw new Error("Failed to fetch playlist");
 
