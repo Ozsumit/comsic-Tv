@@ -50,7 +50,6 @@ const FAST_DOMAINS = [
 // The app will scan the 30,000+ channels and hunt for these words.
 const PINNED_KEYWORDS = [
   "fifa+",
-  ,
   "red bull",
   "espn",
   "sky sport",
