@@ -20,6 +20,7 @@ import {
   Pin,
   Loader2,
 } from "lucide-react";
+import Image from "next/image";
 
 // --- Types & Constants ---
 
@@ -452,12 +453,8 @@ export default function CosmicTVClient() {
       >
         <div className="max-w-[1600px] mx-auto flex items-center justify-between">
           <div className="flex items-center gap-3">
-            <div
-              className={`p-2.5 rounded-xl ${
-                isDark ? "bg-black invert-100" : "bg-black text-white"
-              }`}
-            >
-              <Tv size={24} className="text-white" />
+            <div className={`p-2.5 rounded-xl ${isDark ? "" : "invert"}`}>
+              <Image src="/logo.svg" alt="alt" width={30} height={15} />
             </div>
             <div>
               <h1 className="text-lg font-bold tracking-tight leading-none">
@@ -466,7 +463,8 @@ export default function CosmicTVClient() {
               <p
                 className={`text-[10px] font-bold uppercase tracking-widest pt-1 ${textSecondary}`}
               >
-                Client Side Mode
+                Subset of{" "}
+                <a href="https://cmoon.sumit.info.np"> Crescent Moon</a>
               </p>
             </div>
           </div>
