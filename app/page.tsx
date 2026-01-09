@@ -1,9 +1,12 @@
-import CosmicPlayer from "@/components/comsic"; // Adjust path if needed
+// app/page.tsx
+import { fetchAndParsePlaylist } from "@/lib/playlists";
+import CosmicTVClient from "@/components/comsic"; // Adjust path as needed
 
-// THIS LINE FORCES DYNAMIC RENDERING (Server-Side)
-// It changes the build output from ○ (Static) to λ (Dynamic)
-export const dynamic = "force-dynamic";
+// This ensures the fetch runs at build time (or when revalidated)
+export const revalidate = 3600; // Optional: Update data every hour
 
-export default function Page() {
-  return <CosmicPlayer />;
+export default async function Page() {
+  const channels = await fetchAndParsePlaylist();
+
+  return <CosmicTVClient initialChannels={channels} />;
 }

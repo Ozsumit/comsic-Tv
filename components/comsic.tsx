@@ -21,41 +21,9 @@ import {
   Plus,
   Pin,
 } from "lucide-react";
+import { Channel } from "@/lib/playlists"; // Import the type
 
-// --- TYPES ---
-interface Channel {
-  id: string;
-  name: string;
-  url: string;
-  logo?: string;
-  group?: string;
-  isCustom?: boolean;
-  isPinned?: boolean;
-  score: number;
-}
-
-// --- CONFIG ---
-const FAST_DOMAINS = [
-  "samsungtv",
-  "pluto.tv",
-  "rakuten",
-  "plex",
-  "tubi",
-  "roku",
-  "amagi",
-  "mux",
-];
-
-const PINNED_KEYWORDS = [
-  "fifa+",
-  "red bull",
-  "espn",
-  "sky sport",
-  "bein sport",
-  "nasa",
-  "formula 1",
-];
-
+// Re-define keywords strictly for filtering logic in UI
 const SPORTS_KEYWORDS = [
   "sport",
   "football",
@@ -73,18 +41,21 @@ const SPORTS_KEYWORDS = [
   "golf",
 ];
 
-// Keep Custom Channels if you have private links
-const CUSTOM_CHANNELS: Partial<Channel>[] = [];
+interface ClientProps {
+  initialChannels: Channel[];
+}
 
-export default function ComsicTV() {
+export default function CosmicTVClient({ initialChannels }: ClientProps) {
   const videoRef = useRef<HTMLVideoElement | null>(null);
 
   // -- State --
   const [theme, setTheme] = useState<"light" | "dark">("dark");
-  const [allChannels, setAllChannels] = useState<Channel[]>([]);
+
+  // Initialize with the data passed from the server
+  const [allChannels, setAllChannels] = useState<Channel[]>(initialChannels);
+
   const [workingIds, setWorkingIds] = useState<string[]>([]);
   const [currentChannel, setCurrentChannel] = useState<Channel | null>(null);
-
   const [playerStatus, setPlayerStatus] = useState<
     "idle" | "loading" | "playing" | "error" | "proxying" | "dead"
   >("idle");
@@ -92,120 +63,39 @@ export default function ComsicTV() {
   const [viewMode, setViewMode] = useState<"sports" | "all">("sports");
   const [search, setSearch] = useState("");
   const [limit, setLimit] = useState(50);
-  const [appLoading, setAppLoading] = useState(true);
 
   // -- Theme Handler --
   useEffect(() => {
-    // Check for document to ensure this runs only on client
     if (typeof document !== "undefined") {
       document.body.style.backgroundColor =
         theme === "dark" ? "#09090b" : "#f4f4f5";
     }
   }, [theme]);
 
-  // -- LOAD & SCAN PLAYLIST --
+  // -- LOAD HISTORY --
   useEffect(() => {
-    // Safe access to localStorage
     if (typeof window !== "undefined") {
       const saved = localStorage.getItem("swiss_working_channels");
       if (saved) setWorkingIds(JSON.parse(saved));
     }
-
-    async function loadPlaylist() {
-      try {
-        const res = await fetch("https://iptv-org.github.io/iptv/index.m3u");
-        const text = await res.text();
-        const lines = text.split("\n");
-        const parsed: Channel[] = [];
-        let name = "",
-          logo = "",
-          group = "";
-
-        for (let i = 0; i < lines.length; i++) {
-          const line = lines[i].trim();
-          if (line.startsWith("#EXTINF")) {
-            const n = line.match(/,(.*)$/);
-            const l = line.match(/tvg-logo="(.*?)"/);
-            const g = line.match(/group-title="(.*?)"/);
-            name = n ? n[1].trim() : "Unknown";
-            logo = l ? l[1] : "";
-            group = g ? g[1] : "Uncategorized";
-          }
-          if (line.startsWith("http")) {
-            let score = 0;
-            const lowerUrl = line.toLowerCase();
-            const lowerName = name.toLowerCase();
-
-            // DYNAMIC PINNING LOGIC
-            let isPinned = false;
-            if (PINNED_KEYWORDS.some((k) => lowerName.includes(k))) {
-              isPinned = true;
-              score += 2000;
-            }
-
-            // Standard Scoring
-            if (FAST_DOMAINS.some((d) => lowerUrl.includes(d))) score += 50;
-            if (line.startsWith("https")) score += 10;
-
-            parsed.push({
-              id: `${name}-${i}`,
-              name,
-              logo,
-              group,
-              url: line,
-              score,
-              isPinned,
-            });
-          }
-        }
-
-        // Merge hardcoded customs with parsed
-        const customs: Channel[] = CUSTOM_CHANNELS.map(
-          (c, i) =>
-            ({
-              id: `custom-${i}`,
-              name: c.name!,
-              url: c.url!,
-              logo: c.logo || "",
-              group: c.group || "Custom",
-              isCustom: true,
-              score: 5000,
-              isPinned: true,
-            } as Channel)
-        );
-
-        setAllChannels([...customs, ...parsed]);
-      } catch (err) {
-        console.error("Failed to load playlist:", err);
-      } finally {
-        setAppLoading(false);
-      }
-    }
-    loadPlaylist();
   }, []);
 
-  // -- PLAYER LOGIC --
+  // -- PLAYER LOGIC (Kept same as your code) --
   useEffect(() => {
     if (!currentChannel || !videoRef.current) return;
-
     const video = videoRef.current;
     let hls: Hls | null = null;
     let loadTimeout: NodeJS.Timeout;
 
     setPlayerStatus("loading");
 
-    // Timeout to detect stuck loading states
     loadTimeout = setTimeout(() => {
-      if (video.paused && video.readyState < 3) {
-        setPlayerStatus("error");
-      }
+      if (video.paused && video.readyState < 3) setPlayerStatus("error");
     }, 15000);
 
     const handleSuccess = () => {
       setPlayerStatus("playing");
       clearTimeout(loadTimeout);
-
-      // Update working channels history
       if (!workingIds.includes(currentChannel.id)) {
         const newIds = [currentChannel.id, ...workingIds].slice(0, 50);
         setWorkingIds(newIds);
@@ -239,7 +129,6 @@ export default function ComsicTV() {
               if (!isProxyAttempt) {
                 setPlayerStatus("proxying");
                 hls?.destroy();
-                // Fallback proxy
                 const proxyUrl = `https://corsproxy.io/?${encodeURIComponent(
                   currentChannel.url
                 )}`;
@@ -259,14 +148,10 @@ export default function ComsicTV() {
         hls.loadSource(urlToPlay);
         hls.attachMedia(video);
         hls.on(Hls.Events.MANIFEST_PARSED, () => {
-          video.play().catch(() => {
-            // Auto-play might be blocked by browser policies
-            console.log("Autoplay prevented by browser");
-          });
+          video.play().catch(() => console.log("Autoplay prevented"));
         });
         hls.on(Hls.Events.FRAG_LOADED, handleSuccess);
       } else if (video.canPlayType("application/vnd.apple.mpegurl")) {
-        // Native HLS support (Safari)
         video.src = urlToPlay;
         video.load();
         video.onplaying = handleSuccess;
@@ -281,7 +166,7 @@ export default function ComsicTV() {
       if (hls) hls.destroy();
       clearTimeout(loadTimeout);
     };
-  }, [currentChannel, workingIds]); // Added workingIds to dependency to keep linter happy, though logic mainly relies on currentChannel
+  }, [currentChannel, workingIds]);
 
   // -- Direct URL Paste --
   const handleUrlPaste = () => {
@@ -304,11 +189,9 @@ export default function ComsicTV() {
   // -- SORTING & FILTERING --
   const displayList = useMemo(() => {
     let list = allChannels;
-
-    // 1. Filter
     if (viewMode === "sports") {
       list = list.filter((c) => {
-        if (c.isCustom || c.isPinned) return true; // Always show pinned/custom in sports view
+        if (c.isCustom || c.isPinned) return true;
         const txt = (c.name + c.group).toLowerCase();
         return SPORTS_KEYWORDS.some((k) => txt.includes(k));
       });
@@ -318,11 +201,9 @@ export default function ComsicTV() {
         c.name.toLowerCase().includes(search.toLowerCase())
       );
 
-    // 2. Sort
     return list.sort((a, b) => {
       let scoreA = a.score;
       let scoreB = b.score;
-      // History Boost
       if (workingIds.includes(a.id)) scoreA += 100;
       if (workingIds.includes(b.id)) scoreB += 100;
       return scoreB - scoreA;
@@ -344,6 +225,7 @@ export default function ComsicTV() {
     <div
       className={`min-h-screen font-sans transition-colors duration-200 ${bgMain} ${textPrimary}`}
     >
+      {/* HEADER */}
       <header
         className={`sticky top-0 z-50 backdrop-blur-xl border-b py-4 px-4 lg:px-8 ${bgHeader}`}
       >
@@ -354,7 +236,6 @@ export default function ComsicTV() {
                 isDark ? "bg-black invert-100" : "bg-black text-white"
               }`}
             >
-              {/* Use simple text or an Icon here if logo.svg is missing in your project */}
               <Tv size={24} className="text-white" />
             </div>
             <div>
@@ -368,7 +249,7 @@ export default function ComsicTV() {
                 <a
                   href="https://cmoon.sumit.info.np"
                   target="_blank"
-                  rel="noopener noreferrer"
+                  rel="noreferrer"
                 >
                   Crescent Moon
                 </a>
@@ -420,9 +301,11 @@ export default function ComsicTV() {
         </div>
       </header>
 
+      {/* BODY */}
       <div className="max-w-[1600px] mx-auto grid grid-cols-1 lg:grid-cols-12 gap-6 p-4 lg:p-8">
         <div className="lg:col-span-8 space-y-4">
           <div className="sticky top-24 z-10">
+            {/* PLAYER CONTAINER */}
             <div
               className={`relative aspect-video rounded-3xl overflow-hidden shadow-2xl transition-all ${
                 isDark
@@ -458,34 +341,19 @@ export default function ComsicTV() {
                       </p>
                     </div>
                   )}
-                  {playerStatus === "dead" && (
+                  {(playerStatus === "dead" || playerStatus === "error") && (
                     <div className="absolute inset-0 flex flex-col items-center justify-center bg-zinc-900 z-20 px-4 text-center">
                       <div className="p-3 bg-red-500/10 text-red-500 rounded-full mb-3">
                         <AlertTriangle size={32} />
                       </div>
                       <h3 className="text-white font-bold mb-1">
-                        Stream Expired
+                        {playerStatus === "dead"
+                          ? "Stream Expired"
+                          : "Signal Lost"}
                       </h3>
-                      <p className="text-zinc-500 text-xs mb-4">
-                        Try searching for another link for this channel.
-                      </p>
                       <button
                         onClick={() => setPlayerStatus("loading")}
-                        className="flex items-center gap-2 bg-white text-black px-5 py-2.5 rounded-full text-xs font-bold hover:scale-105 transition"
-                      >
-                        <RotateCcw size={14} /> Retry
-                      </button>
-                    </div>
-                  )}
-                  {playerStatus === "error" && (
-                    <div className="absolute inset-0 flex flex-col items-center justify-center bg-zinc-900 z-20 px-4 text-center">
-                      <div className="p-3 bg-red-500/10 text-red-500 rounded-full mb-3">
-                        <AlertTriangle size={32} />
-                      </div>
-                      <h3 className="text-white font-bold mb-1">Signal Lost</h3>
-                      <button
-                        onClick={() => setPlayerStatus("loading")}
-                        className="flex items-center gap-2 bg-white text-black px-5 py-2.5 rounded-full text-xs font-bold hover:scale-105 transition"
+                        className="flex items-center gap-2 bg-white text-black px-5 py-2.5 rounded-full text-xs font-bold hover:scale-105 transition mt-4"
                       >
                         <RotateCcw size={14} /> Retry
                       </button>
@@ -510,6 +378,7 @@ export default function ComsicTV() {
               )}
             </div>
 
+            {/* CURRENT INFO CARD */}
             <div
               className={`mt-4 p-5 rounded-3xl border flex items-center justify-between ${bgCard} ${
                 isDark ? "border-zinc-800" : "border-zinc-200"
@@ -550,6 +419,7 @@ export default function ComsicTV() {
           </div>
         </div>
 
+        {/* SIDEBAR */}
         <div className="lg:col-span-4 flex flex-col h-[calc(100vh-140px)] sticky top-24">
           <div
             className={`p-2 rounded-2xl border mb-4 flex items-center gap-3 ${bgCard} ${
@@ -571,7 +441,7 @@ export default function ComsicTV() {
             </div>
             <input
               type="text"
-              placeholder="Search channel OR Paste .m3u8 link..."
+              placeholder="Search or Paste .m3u8..."
               value={search}
               onChange={(e) => setSearch(e.target.value)}
               className={`bg-transparent w-full outline-none text-sm font-semibold placeholder:${textSecondary} ${textPrimary}`}
@@ -579,7 +449,7 @@ export default function ComsicTV() {
             {isUrlInput && (
               <button
                 onClick={handleUrlPaste}
-                className="bg-emerald-500 hover:bg-emerald-600 text-white px-3 py-1.5 rounded-lg text-xs font-bold whitespace-nowrap transition-colors"
+                className="bg-emerald-500 hover:bg-emerald-600 text-white px-3 py-1.5 rounded-lg text-xs font-bold whitespace-nowrap"
               >
                 Play
               </button>
@@ -587,120 +457,106 @@ export default function ComsicTV() {
           </div>
 
           <div className="flex-1 overflow-y-auto pr-2 custom-scrollbar space-y-2 pb-20">
-            {appLoading ? (
-              <div className="flex flex-col items-center justify-center py-20">
-                <Disc className={`animate-spin mb-2 ${textSecondary}`} />
-                <span
-                  className={`text-xs font-bold uppercase tracking-widest ${textSecondary}`}
-                >
-                  Loading Library...
-                </span>
-              </div>
-            ) : (
-              <>
-                {displayList.slice(0, limit).map((channel) => {
-                  const isActive = currentChannel?.id === channel.id;
-                  const isVerified =
-                    workingIds.includes(channel.id) || channel.score >= 50;
-                  return (
-                    <button
-                      key={channel.id}
-                      onClick={() => setCurrentChannel(channel)}
-                      className={`w-full group relative flex items-center gap-4 p-3 rounded-2xl text-left transition-all duration-200 border ${
-                        isActive
-                          ? "bg-blue-600 border-blue-500 shadow-lg shadow-blue-900/20"
-                          : `${bgCard} ${
-                              isDark
-                                ? "border-zinc-800 hover:border-zinc-600"
-                                : "border-zinc-200 hover:border-zinc-300"
-                            } hover:scale-[1.01]`
-                      }`}
-                    >
-                      <div
-                        className={`w-12 h-12 rounded-xl flex items-center justify-center overflow-hidden shrink-0 border ${
-                          isActive
-                            ? "bg-blue-500/20 border-blue-400/30"
-                            : `${
-                                isDark
-                                  ? "bg-zinc-900 border-zinc-800"
-                                  : "bg-zinc-50 border-zinc-200"
-                              }`
-                        }`}
-                      >
-                        {channel.logo ? (
-                          <img
-                            src={channel.logo}
-                            alt=""
-                            className="w-full h-full object-contain p-1"
-                            loading="lazy"
-                            onError={(e) =>
-                              (e.currentTarget.style.display = "none")
-                            }
-                          />
-                        ) : (
-                          <span
-                            className={`text-xs font-bold ${
-                              isActive ? "text-white/70" : textSecondary
-                            }`}
-                          >
-                            TV
-                          </span>
-                        )}
-                      </div>
-                      <div className="flex-1 min-w-0">
-                        <div className="flex items-center gap-2">
-                          <h3
-                            className={`text-sm font-bold truncate ${
-                              isActive ? "text-white" : textPrimary
-                            }`}
-                          >
-                            {channel.name}
-                          </h3>
-                          {/* SHOW PIN ICON IF PINNED */}
-                          {channel.isPinned && (
-                            <Pin
-                              size={12}
-                              className={`fill-current ${
-                                isActive ? "text-white" : "text-blue-500"
-                              }`}
-                            />
-                          )}
-                        </div>
-                        <p
-                          className={`text-[10px] font-bold uppercase tracking-wider truncate mt-0.5 ${
-                            isActive ? "text-blue-100" : textSecondary
-                          }`}
-                        >
-                          {channel.group}
-                        </p>
-                      </div>
-                      <div className={`${isActive ? "text-white" : ""}`}>
-                        {channel.isCustom ? (
-                          <Zap
-                            size={16}
-                            className="text-yellow-500 fill-yellow-500"
-                          />
-                        ) : isVerified ? (
-                          <Wifi size={16} className="text-emerald-500" />
-                        ) : (
-                          <Radio size={16} className="text-zinc-500" />
-                        )}
-                      </div>
-                    </button>
-                  );
-                })}
+            {displayList.slice(0, limit).map((channel) => {
+              const isActive = currentChannel?.id === channel.id;
+              const isVerified =
+                workingIds.includes(channel.id) || channel.score >= 50;
+              return (
                 <button
-                  onClick={() => setLimit((l) => l + 50)}
-                  className={`w-full py-4 mt-2 text-xs font-bold rounded-xl flex items-center justify-center gap-2 transition-colors ${
-                    isDark
-                      ? "bg-zinc-900 hover:bg-zinc-800 text-zinc-400"
-                      : "bg-white hover:bg-zinc-50 text-zinc-500 border border-zinc-200"
+                  key={channel.id}
+                  onClick={() => setCurrentChannel(channel)}
+                  className={`w-full group relative flex items-center gap-4 p-3 rounded-2xl text-left transition-all duration-200 border ${
+                    isActive
+                      ? "bg-blue-600 border-blue-500 shadow-lg shadow-blue-900/20"
+                      : `${bgCard} ${
+                          isDark
+                            ? "border-zinc-800 hover:border-zinc-600"
+                            : "border-zinc-200 hover:border-zinc-300"
+                        } hover:scale-[1.01]`
                   }`}
                 >
-                  <ChevronDown size={14} /> Load More
+                  <div
+                    className={`w-12 h-12 rounded-xl flex items-center justify-center overflow-hidden shrink-0 border ${
+                      isActive
+                        ? "bg-blue-500/20 border-blue-400/30"
+                        : `${
+                            isDark
+                              ? "bg-zinc-900 border-zinc-800"
+                              : "bg-zinc-50 border-zinc-200"
+                          }`
+                    }`}
+                  >
+                    {channel.logo ? (
+                      <img
+                        src={channel.logo}
+                        alt=""
+                        className="w-full h-full object-contain p-1"
+                        loading="lazy"
+                        onError={(e) =>
+                          (e.currentTarget.style.display = "none")
+                        }
+                      />
+                    ) : (
+                      <span
+                        className={`text-xs font-bold ${
+                          isActive ? "text-white/70" : textSecondary
+                        }`}
+                      >
+                        TV
+                      </span>
+                    )}
+                  </div>
+                  <div className="flex-1 min-w-0">
+                    <div className="flex items-center gap-2">
+                      <h3
+                        className={`text-sm font-bold truncate ${
+                          isActive ? "text-white" : textPrimary
+                        }`}
+                      >
+                        {channel.name}
+                      </h3>
+                      {channel.isPinned && (
+                        <Pin
+                          size={12}
+                          className={`fill-current ${
+                            isActive ? "text-white" : "text-blue-500"
+                          }`}
+                        />
+                      )}
+                    </div>
+                    <p
+                      className={`text-[10px] font-bold uppercase tracking-wider truncate mt-0.5 ${
+                        isActive ? "text-blue-100" : textSecondary
+                      }`}
+                    >
+                      {channel.group}
+                    </p>
+                  </div>
+                  <div className={`${isActive ? "text-white" : ""}`}>
+                    {channel.isCustom ? (
+                      <Zap
+                        size={16}
+                        className="text-yellow-500 fill-yellow-500"
+                      />
+                    ) : isVerified ? (
+                      <Wifi size={16} className="text-emerald-500" />
+                    ) : (
+                      <Radio size={16} className="text-zinc-500" />
+                    )}
+                  </div>
                 </button>
-              </>
-            )}
+              );
+            })}
+            <button
+              onClick={() => setLimit((l) => l + 50)}
+              className={`w-full py-4 mt-2 text-xs font-bold rounded-xl flex items-center justify-center gap-2 transition-colors ${
+                isDark
+                  ? "bg-zinc-900 hover:bg-zinc-800 text-zinc-400"
+                  : "bg-white hover:bg-zinc-50 text-zinc-500 border border-zinc-200"
+              }`}
+            >
+              <ChevronDown size={14} /> Load More
+            </button>
           </div>
         </div>
       </div>
