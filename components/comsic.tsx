@@ -3,14 +3,40 @@
 import { useEffect, useRef, useState, useMemo } from "react";
 import Hls from "hls.js";
 import {
-  Play, Search, Tv, Trophy, Globe, Zap, RotateCcw,
-  Moon, Sun, Wifi, Radio, AlertTriangle, ChevronDown, RefreshCcw, Plus, Pin
+  Play,
+  Search,
+  Tv,
+  Trophy,
+  Globe,
+  Zap,
+  RotateCcw,
+  Moon,
+  Sun,
+  Wifi,
+  Radio,
+  AlertTriangle,
+  ChevronDown,
+  RefreshCcw,
+  Plus,
+  Pin,
 } from "lucide-react";
-import { Channel } from "@/lib/playlists"; 
+import { Channel } from "@/lib/playlist";
 
 const SPORTS_KEYWORDS = [
-  "sport", "football", "soccer", "racing", "nba", "nfl", "tennis",
-  "ufc", "wwe", "league", "fox", "arena", "fight", "golf",
+  "sport",
+  "football",
+  "soccer",
+  "racing",
+  "nba",
+  "nfl",
+  "tennis",
+  "ufc",
+  "wwe",
+  "league",
+  "fox",
+  "arena",
+  "fight",
+  "golf",
 ];
 
 interface ClientProps {
@@ -19,7 +45,7 @@ interface ClientProps {
 
 export default function CosmicTVClient({ initialChannels }: ClientProps) {
   const videoRef = useRef<HTMLVideoElement | null>(null);
-  
+
   // -- State --
   const [theme, setTheme] = useState<"light" | "dark">("dark");
   const [allChannels, setAllChannels] = useState<Channel[]>(initialChannels);
@@ -32,11 +58,12 @@ export default function CosmicTVClient({ initialChannels }: ClientProps) {
   const [viewMode, setViewMode] = useState<"sports" | "all">("sports");
   const [search, setSearch] = useState("");
   const [limit, setLimit] = useState(50);
-  
+
   // -- Theme Handler --
   useEffect(() => {
     if (typeof document !== "undefined") {
-      document.body.style.backgroundColor = theme === "dark" ? "#09090b" : "#f4f4f5";
+      document.body.style.backgroundColor =
+        theme === "dark" ? "#09090b" : "#f4f4f5";
     }
   }, [theme]);
 
@@ -69,7 +96,10 @@ export default function CosmicTVClient({ initialChannels }: ClientProps) {
         const newIds = [currentChannel.id, ...workingIds].slice(0, 50);
         setWorkingIds(newIds);
         if (typeof window !== "undefined") {
-          localStorage.setItem("swiss_working_channels", JSON.stringify(newIds));
+          localStorage.setItem(
+            "swiss_working_channels",
+            JSON.stringify(newIds)
+          );
         }
       }
     };
@@ -78,39 +108,41 @@ export default function CosmicTVClient({ initialChannels }: ClientProps) {
       if (Hls.isSupported()) {
         if (hls) hls.destroy();
 
-        // --- UNIVERSAL PROXY LOADER ---
-        // This intercepts requests. If it's NOT already proxied, it proxies it.
-        // This fixes Mixed Content (HTTP) AND CORS (HTTPS blocking).
-        class UniversalProxyLoader extends Hls.DefaultConfig.loader {
-            constructor(config: any) {
-                super(config);
-                const load = this.load.bind(this);
-                this.load = (context: any, config: any, callbacks: any) => {
-                    // 1. Check if already proxied to avoid double-wrapping
-                    if (!context.url.includes('corsproxy.io')) {
-                        // 2. Logic: Proxy if HTTP (Mixed Content) OR if it's a known strict CORS domain (Pluto, Samsung, etc)
-                        // Actually, for a web player, it's safer to proxy almost everything external.
-                        context.url = `https://corsproxy.io/?${encodeURIComponent(context.url)}`;
-                    }
-                    load(context, config, callbacks);
-                };
-            }
+        // --- CUSTOM LOADER TO FIX MIXED CONTENT ---
+        // This intercepts every request. If it's HTTP, it proxies it.
+        class MixedContentLoader extends Hls.DefaultConfig.loader {
+          constructor(config: any) {
+            super(config);
+            const load = this.load.bind(this);
+            this.load = (context: any, config: any, callbacks: any) => {
+              // Check if we are on HTTPS but the stream is HTTP
+              if (
+                window.location.protocol === "https:" &&
+                context.url.startsWith("http://")
+              ) {
+                // Force CORS Proxy for this specific chunk/manifest
+                context.url = `https://corsproxy.io/?${encodeURIComponent(
+                  context.url
+                )}`;
+              }
+              load(context, config, callbacks);
+            };
+          }
         }
 
-        hls = new Hls({ 
-            enableWorker: true, 
-            lowLatencyMode: true,
-            // @ts-ignore
-            loader: UniversalProxyLoader 
+        hls = new Hls({
+          enableWorker: true,
+          lowLatencyMode: true,
+          // @ts-ignore - Hls.js types can be finicky with custom loaders
+          loader: MixedContentLoader,
         });
 
         hls.on(Hls.Events.ERROR, (event, data) => {
           if (data.fatal) {
-            console.error("HLS Error:", data);
-            
-            // ERR_NAME_NOT_RESOLVED or 404/403 usually ends up here
+            console.error("HLS Error", data);
             if (data.type === Hls.ErrorTypes.NETWORK_ERROR) {
-              setPlayerStatus("dead"); 
+              // If it failed even with the proxy, it's likely a dead stream (404/403)
+              setPlayerStatus("dead");
               hls?.destroy();
             } else if (data.type === Hls.ErrorTypes.MEDIA_ERROR) {
               hls?.recoverMediaError();
@@ -128,17 +160,22 @@ export default function CosmicTVClient({ initialChannels }: ClientProps) {
         });
         hls.on(Hls.Events.FRAG_LOADED, handleSuccess);
       } else if (video.canPlayType("application/vnd.apple.mpegurl")) {
-        // Safari Logic
+        // Safari has native HLS support.
+        // Note: Safari handles Mixed Content differently, but often fails silently on Strict mode.
+        // We try to proxy the main URL immediately for Safari.
         let finalUrl = currentChannel.url;
-        // Always proxy for Safari to be safe against CORS too
-        if (!finalUrl.includes('corsproxy.io')) {
-            finalUrl = `https://corsproxy.io/?${encodeURIComponent(finalUrl)}`;
+        if (
+          typeof window !== "undefined" &&
+          window.location.protocol === "https:" &&
+          finalUrl.startsWith("http://")
+        ) {
+          finalUrl = `https://corsproxy.io/?${encodeURIComponent(finalUrl)}`;
         }
-        
+
         video.src = finalUrl;
         video.load();
         video.onplaying = handleSuccess;
-        video.onerror = () => setPlayerStatus("dead"); // Usually implies 404/Network Error
+        video.onerror = () => setPlayerStatus("error");
         video.play().catch(() => {});
       }
     };
@@ -149,7 +186,7 @@ export default function CosmicTVClient({ initialChannels }: ClientProps) {
       if (hls) hls.destroy();
       clearTimeout(loadTimeout);
     };
-  }, [currentChannel, workingIds]); 
+  }, [currentChannel, workingIds]);
 
   // -- Direct URL Paste --
   const handleUrlPaste = () => {
@@ -173,13 +210,15 @@ export default function CosmicTVClient({ initialChannels }: ClientProps) {
     let list = allChannels;
     if (viewMode === "sports") {
       list = list.filter((c) => {
-        if (c.isCustom || c.isPinned) return true; 
+        if (c.isCustom || c.isPinned) return true;
         const txt = (c.name + c.group).toLowerCase();
         return SPORTS_KEYWORDS.some((k) => txt.includes(k));
       });
     }
     if (search && !search.startsWith("http"))
-      list = list.filter((c) => c.name.toLowerCase().includes(search.toLowerCase()));
+      list = list.filter((c) =>
+        c.name.toLowerCase().includes(search.toLowerCase())
+      );
 
     return list.sort((a, b) => {
       let scoreA = a.score;
@@ -195,35 +234,87 @@ export default function CosmicTVClient({ initialChannels }: ClientProps) {
   const isDark = theme === "dark";
   const bgMain = isDark ? "bg-[#09090b]" : "bg-[#f4f4f5]";
   const bgCard = isDark ? "bg-[#18181b]" : "bg-white";
-  const bgHeader = isDark ? "bg-[#09090b]/80 border-zinc-800" : "bg-white/80 border-zinc-200";
+  const bgHeader = isDark
+    ? "bg-[#09090b]/80 border-zinc-800"
+    : "bg-white/80 border-zinc-200";
   const textPrimary = isDark ? "text-white" : "text-zinc-900";
   const textSecondary = isDark ? "text-zinc-400" : "text-zinc-500";
 
   return (
-    <div className={`min-h-screen font-sans transition-colors duration-200 ${bgMain} ${textPrimary}`}>
+    <div
+      className={`min-h-screen font-sans transition-colors duration-200 ${bgMain} ${textPrimary}`}
+    >
       {/* HEADER */}
-      <header className={`sticky top-0 z-50 backdrop-blur-xl border-b py-4 px-4 lg:px-8 ${bgHeader}`}>
+      <header
+        className={`sticky top-0 z-50 backdrop-blur-xl border-b py-4 px-4 lg:px-8 ${bgHeader}`}
+      >
         <div className="max-w-[1600px] mx-auto flex items-center justify-between">
           <div className="flex items-center gap-3">
-            <div className={`p-2.5 rounded-xl ${isDark ? "bg-black invert-100" : "bg-black text-white"}`}>
+            <div
+              className={`p-2.5 rounded-xl ${
+                isDark ? "bg-black invert-100" : "bg-black text-white"
+              }`}
+            >
               <Tv size={24} className="text-white" />
             </div>
             <div>
-              <h1 className="text-lg font-bold tracking-tight leading-none">Cosmic TV</h1>
-              <p className={`text-[10px] font-bold uppercase tracking-widest pt-1 ${textSecondary}`}>
-                Subset of <a href="https://cmoon.sumit.info.np" target="_blank" rel="noreferrer">Crescent Moon</a>
+              <h1 className="text-lg font-bold tracking-tight leading-none">
+                Cosmic TV
+              </h1>
+              <p
+                className={`text-[10px] font-bold uppercase tracking-widest pt-1 ${textSecondary}`}
+              >
+                Subset of{" "}
+                <a
+                  href="https://cmoon.sumit.info.np"
+                  target="_blank"
+                  rel="noreferrer"
+                >
+                  Crescent Moon
+                </a>
               </p>
             </div>
           </div>
-          <div className={`flex p-1 rounded-full border ${isDark ? "bg-[#18181b] border-zinc-800" : "bg-white border-zinc-200 shadow-sm"}`}>
-            <button onClick={() => setViewMode("sports")} className={`px-4 py-1.5 rounded-full text-xs font-bold transition-all flex items-center gap-2 ${viewMode === "sports" ? isDark ? "bg-zinc-700 text-white" : "bg-black text-white" : `${textSecondary} hover:text-current`}`}>
+          <div
+            className={`flex p-1 rounded-full border ${
+              isDark
+                ? "bg-[#18181b] border-zinc-800"
+                : "bg-white border-zinc-200 shadow-sm"
+            }`}
+          >
+            <button
+              onClick={() => setViewMode("sports")}
+              className={`px-4 py-1.5 rounded-full text-xs font-bold transition-all flex items-center gap-2 ${
+                viewMode === "sports"
+                  ? isDark
+                    ? "bg-zinc-700 text-white"
+                    : "bg-black text-white"
+                  : `${textSecondary} hover:text-current`
+              }`}
+            >
               <Trophy size={14} /> Sports
             </button>
-            <button onClick={() => setViewMode("all")} className={`px-4 py-1.5 rounded-full text-xs font-bold transition-all flex items-center gap-2 ${viewMode === "all" ? isDark ? "bg-zinc-700 text-white" : "bg-black text-white" : `${textSecondary} hover:text-current`}`}>
+            <button
+              onClick={() => setViewMode("all")}
+              className={`px-4 py-1.5 rounded-full text-xs font-bold transition-all flex items-center gap-2 ${
+                viewMode === "all"
+                  ? isDark
+                    ? "bg-zinc-700 text-white"
+                    : "bg-black text-white"
+                  : `${textSecondary} hover:text-current`
+              }`}
+            >
               <Globe size={14} /> All
             </button>
           </div>
-          <button onClick={() => setTheme(isDark ? "light" : "dark")} className={`p-2.5 rounded-full border transition-all ${isDark ? "border-zinc-800 bg-[#18181b] hover:bg-zinc-800 text-yellow-400" : "border-zinc-200 bg-white hover:bg-zinc-50 text-zinc-600"}`}>
+          <button
+            onClick={() => setTheme(isDark ? "light" : "dark")}
+            className={`p-2.5 rounded-full border transition-all ${
+              isDark
+                ? "border-zinc-800 bg-[#18181b] hover:bg-zinc-800 text-yellow-400"
+                : "border-zinc-200 bg-white hover:bg-zinc-50 text-zinc-600"
+            }`}
+          >
             {isDark ? <Sun size={18} /> : <Moon size={18} />}
           </button>
         </div>
@@ -234,32 +325,47 @@ export default function CosmicTVClient({ initialChannels }: ClientProps) {
         <div className="lg:col-span-8 space-y-4">
           <div className="sticky top-24 z-10">
             {/* PLAYER CONTAINER */}
-            <div className={`relative aspect-video rounded-3xl overflow-hidden shadow-2xl transition-all ${isDark ? "bg-black ring-1 ring-zinc-800" : "bg-black ring-4 ring-white"}`}>
+            <div
+              className={`relative aspect-video rounded-3xl overflow-hidden shadow-2xl transition-all ${
+                isDark
+                  ? "bg-black ring-1 ring-zinc-800"
+                  : "bg-black ring-4 ring-white"
+              }`}
+            >
               {currentChannel ? (
                 <>
-                  <video ref={videoRef} controls autoPlay playsInline className="w-full h-full object-contain" />
+                  <video
+                    ref={videoRef}
+                    controls
+                    autoPlay
+                    playsInline
+                    className="w-full h-full object-contain"
+                  />
                   {playerStatus === "loading" && (
                     <div className="absolute inset-0 flex flex-col items-center justify-center bg-black/80 z-20">
                       <div className="w-12 h-12 border-4 border-zinc-700 border-t-white rounded-full animate-spin mb-4" />
-                      <p className="text-sm font-bold text-white">Connecting...</p>
+                      <p className="text-sm font-bold text-white">
+                        Connecting...
+                      </p>
                     </div>
                   )}
-                  {/* PROXYING STATUS IS HIDDEN AS IT HAPPENS INSTANTLY NOW */}
-                  
                   {(playerStatus === "dead" || playerStatus === "error") && (
                     <div className="absolute inset-0 flex flex-col items-center justify-center bg-zinc-900 z-20 px-4 text-center">
                       <div className="p-3 bg-red-500/10 text-red-500 rounded-full mb-3">
                         <AlertTriangle size={32} />
                       </div>
                       <h3 className="text-white font-bold mb-1">
-                        {playerStatus === "dead" ? "Stream Unavailable" : "Signal Lost"}
+                        {playerStatus === "dead"
+                          ? "Stream Unavailable"
+                          : "Signal Lost"}
                       </h3>
-                      <p className="text-zinc-500 text-xs mb-4 max-w-[250px]">
-                        {playerStatus === "dead" 
-                          ? "This channel is offline, geo-blocked, or the link has expired." 
-                          : "Connection interrupted. Please try again."}
+                      <p className="text-zinc-500 text-xs mb-4">
+                        The channel might be geo-blocked or offline.
                       </p>
-                      <button onClick={() => setPlayerStatus("loading")} className="flex items-center gap-2 bg-white text-black px-5 py-2.5 rounded-full text-xs font-bold hover:scale-105 transition">
+                      <button
+                        onClick={() => setPlayerStatus("loading")}
+                        className="flex items-center gap-2 bg-white text-black px-5 py-2.5 rounded-full text-xs font-bold hover:scale-105 transition"
+                      >
                         <RotateCcw size={14} /> Retry
                       </button>
                     </div>
@@ -267,22 +373,56 @@ export default function CosmicTVClient({ initialChannels }: ClientProps) {
                 </>
               ) : (
                 <div className="w-full h-full flex flex-col items-center justify-center">
-                  <div className={`w-20 h-20 rounded-full flex items-center justify-center mb-4 ${isDark ? "bg-zinc-900 text-zinc-700" : "bg-zinc-100 text-zinc-300"}`}>
+                  <div
+                    className={`w-20 h-20 rounded-full flex items-center justify-center mb-4 ${
+                      isDark
+                        ? "bg-zinc-900 text-zinc-700"
+                        : "bg-zinc-100 text-zinc-300"
+                    }`}
+                  >
                     <Play size={32} fill="currentColor" />
                   </div>
-                  <p className={`font-medium ${textSecondary}`}>Select a channel to start</p>
+                  <p className={`font-medium ${textSecondary}`}>
+                    Select a channel to start
+                  </p>
                 </div>
               )}
             </div>
-            
+
             {/* CURRENT INFO CARD */}
-            <div className={`mt-4 p-5 rounded-3xl border flex items-center justify-between ${bgCard} ${isDark ? "border-zinc-800" : "border-zinc-200"}`}>
-               <div>
-                <h2 className={`font-bold text-lg leading-tight truncate max-w-md ${textPrimary}`}>{currentChannel?.name || "No Channel Selected"}</h2>
+            <div
+              className={`mt-4 p-5 rounded-3xl border flex items-center justify-between ${bgCard} ${
+                isDark ? "border-zinc-800" : "border-zinc-200"
+              }`}
+            >
+              <div>
+                <h2
+                  className={`font-bold text-lg leading-tight truncate max-w-md ${textPrimary}`}
+                >
+                  {currentChannel?.name || "No Channel Selected"}
+                </h2>
                 <div className="flex items-center gap-2 mt-2">
-                  <div className={`flex items-center gap-1.5 px-2 py-1 rounded-md text-[10px] font-bold uppercase tracking-wider ${isDark ? "bg-zinc-800 text-zinc-400" : "bg-zinc-100 text-zinc-500"}`}>
-                    <span className={`w-1.5 h-1.5 rounded-full ${playerStatus === "playing" ? "bg-emerald-500" : playerStatus === "loading" ? "bg-yellow-500 animate-pulse" : "bg-zinc-500"}`} />
-                    {playerStatus === "playing" ? "Live" : playerStatus === "loading" ? "Buffering..." : "Offline"}
+                  <div
+                    className={`flex items-center gap-1.5 px-2 py-1 rounded-md text-[10px] font-bold uppercase tracking-wider ${
+                      isDark
+                        ? "bg-zinc-800 text-zinc-400"
+                        : "bg-zinc-100 text-zinc-500"
+                    }`}
+                  >
+                    <span
+                      className={`w-1.5 h-1.5 rounded-full ${
+                        playerStatus === "playing"
+                          ? "bg-emerald-500"
+                          : playerStatus === "proxying"
+                          ? "bg-blue-500 animate-pulse"
+                          : "bg-zinc-500"
+                      }`}
+                    />
+                    {playerStatus === "playing"
+                      ? "Live"
+                      : playerStatus === "proxying"
+                      ? "Unblocking..."
+                      : "Offline"}
                   </div>
                 </div>
               </div>
@@ -292,43 +432,140 @@ export default function CosmicTVClient({ initialChannels }: ClientProps) {
 
         {/* SIDEBAR */}
         <div className="lg:col-span-4 flex flex-col h-[calc(100vh-140px)] sticky top-24">
-          <div className={`p-2 rounded-2xl border mb-4 flex items-center gap-3 ${bgCard} ${isDark ? "border-zinc-800" : "border-zinc-200"}`}>
-            <div className={`p-2 rounded-xl ${isDark ? "bg-zinc-800 text-zinc-400" : "bg-zinc-100 text-zinc-400"}`}>
-              {isUrlInput ? <Plus size={18} className="text-emerald-500" /> : <Search size={18} />}
+          <div
+            className={`p-2 rounded-2xl border mb-4 flex items-center gap-3 ${bgCard} ${
+              isDark ? "border-zinc-800" : "border-zinc-200"
+            }`}
+          >
+            <div
+              className={`p-2 rounded-xl ${
+                isDark
+                  ? "bg-zinc-800 text-zinc-400"
+                  : "bg-zinc-100 text-zinc-400"
+              }`}
+            >
+              {isUrlInput ? (
+                <Plus size={18} className="text-emerald-500" />
+              ) : (
+                <Search size={18} />
+              )}
             </div>
-            <input type="text" placeholder="Search or Paste .m3u8..." value={search} onChange={(e) => setSearch(e.target.value)} className={`bg-transparent w-full outline-none text-sm font-semibold placeholder:${textSecondary} ${textPrimary}`} />
+            <input
+              type="text"
+              placeholder="Search or Paste .m3u8..."
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+              className={`bg-transparent w-full outline-none text-sm font-semibold placeholder:${textSecondary} ${textPrimary}`}
+            />
             {isUrlInput && (
-              <button onClick={handleUrlPaste} className="bg-emerald-500 hover:bg-emerald-600 text-white px-3 py-1.5 rounded-lg text-xs font-bold whitespace-nowrap">Play</button>
+              <button
+                onClick={handleUrlPaste}
+                className="bg-emerald-500 hover:bg-emerald-600 text-white px-3 py-1.5 rounded-lg text-xs font-bold whitespace-nowrap"
+              >
+                Play
+              </button>
             )}
           </div>
 
           <div className="flex-1 overflow-y-auto pr-2 custom-scrollbar space-y-2 pb-20">
             {displayList.slice(0, limit).map((channel) => {
               const isActive = currentChannel?.id === channel.id;
-              const isVerified = workingIds.includes(channel.id) || channel.score >= 50;
+              const isVerified =
+                workingIds.includes(channel.id) || channel.score >= 50;
               return (
-                <button key={channel.id} onClick={() => setCurrentChannel(channel)} className={`w-full group relative flex items-center gap-4 p-3 rounded-2xl text-left transition-all duration-200 border ${isActive ? "bg-blue-600 border-blue-500 shadow-lg shadow-blue-900/20" : `${bgCard} ${isDark ? "border-zinc-800 hover:border-zinc-600" : "border-zinc-200 hover:border-zinc-300"} hover:scale-[1.01]`}`}>
-                  <div className={`w-12 h-12 rounded-xl flex items-center justify-center overflow-hidden shrink-0 border ${isActive ? "bg-blue-500/20 border-blue-400/30" : `${isDark ? "bg-zinc-900 border-zinc-800" : "bg-zinc-50 border-zinc-200"}`}`}>
+                <button
+                  key={channel.id}
+                  onClick={() => setCurrentChannel(channel)}
+                  className={`w-full group relative flex items-center gap-4 p-3 rounded-2xl text-left transition-all duration-200 border ${
+                    isActive
+                      ? "bg-blue-600 border-blue-500 shadow-lg shadow-blue-900/20"
+                      : `${bgCard} ${
+                          isDark
+                            ? "border-zinc-800 hover:border-zinc-600"
+                            : "border-zinc-200 hover:border-zinc-300"
+                        } hover:scale-[1.01]`
+                  }`}
+                >
+                  <div
+                    className={`w-12 h-12 rounded-xl flex items-center justify-center overflow-hidden shrink-0 border ${
+                      isActive
+                        ? "bg-blue-500/20 border-blue-400/30"
+                        : `${
+                            isDark
+                              ? "bg-zinc-900 border-zinc-800"
+                              : "bg-zinc-50 border-zinc-200"
+                          }`
+                    }`}
+                  >
                     {channel.logo ? (
-                      <img src={channel.logo} alt="" className="w-full h-full object-contain p-1" loading="lazy" onError={(e) => (e.currentTarget.style.display = "none")} />
+                      <img
+                        src={channel.logo}
+                        alt=""
+                        className="w-full h-full object-contain p-1"
+                        loading="lazy"
+                        onError={(e) =>
+                          (e.currentTarget.style.display = "none")
+                        }
+                      />
                     ) : (
-                      <span className={`text-xs font-bold ${isActive ? "text-white/70" : textSecondary}`}>TV</span>
+                      <span
+                        className={`text-xs font-bold ${
+                          isActive ? "text-white/70" : textSecondary
+                        }`}
+                      >
+                        TV
+                      </span>
                     )}
                   </div>
                   <div className="flex-1 min-w-0">
                     <div className="flex items-center gap-2">
-                      <h3 className={`text-sm font-bold truncate ${isActive ? "text-white" : textPrimary}`}>{channel.name}</h3>
-                      {channel.isPinned && <Pin size={12} className={`fill-current ${isActive ? "text-white" : "text-blue-500"}`} />}
+                      <h3
+                        className={`text-sm font-bold truncate ${
+                          isActive ? "text-white" : textPrimary
+                        }`}
+                      >
+                        {channel.name}
+                      </h3>
+                      {channel.isPinned && (
+                        <Pin
+                          size={12}
+                          className={`fill-current ${
+                            isActive ? "text-white" : "text-blue-500"
+                          }`}
+                        />
+                      )}
                     </div>
-                    <p className={`text-[10px] font-bold uppercase tracking-wider truncate mt-0.5 ${isActive ? "text-blue-100" : textSecondary}`}>{channel.group}</p>
+                    <p
+                      className={`text-[10px] font-bold uppercase tracking-wider truncate mt-0.5 ${
+                        isActive ? "text-blue-100" : textSecondary
+                      }`}
+                    >
+                      {channel.group}
+                    </p>
                   </div>
                   <div className={`${isActive ? "text-white" : ""}`}>
-                    {channel.isCustom ? <Zap size={16} className="text-yellow-500 fill-yellow-500" /> : isVerified ? <Wifi size={16} className="text-emerald-500" /> : <Radio size={16} className="text-zinc-500" />}
+                    {channel.isCustom ? (
+                      <Zap
+                        size={16}
+                        className="text-yellow-500 fill-yellow-500"
+                      />
+                    ) : isVerified ? (
+                      <Wifi size={16} className="text-emerald-500" />
+                    ) : (
+                      <Radio size={16} className="text-zinc-500" />
+                    )}
                   </div>
                 </button>
               );
             })}
-            <button onClick={() => setLimit((l) => l + 50)} className={`w-full py-4 mt-2 text-xs font-bold rounded-xl flex items-center justify-center gap-2 transition-colors ${isDark ? "bg-zinc-900 hover:bg-zinc-800 text-zinc-400" : "bg-white hover:bg-zinc-50 text-zinc-500 border border-zinc-200"}`}>
+            <button
+              onClick={() => setLimit((l) => l + 50)}
+              className={`w-full py-4 mt-2 text-xs font-bold rounded-xl flex items-center justify-center gap-2 transition-colors ${
+                isDark
+                  ? "bg-zinc-900 hover:bg-zinc-800 text-zinc-400"
+                  : "bg-white hover:bg-zinc-50 text-zinc-500 border border-zinc-200"
+              }`}
+            >
               <ChevronDown size={14} /> Load More
             </button>
           </div>
