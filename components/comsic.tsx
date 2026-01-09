@@ -21,7 +21,9 @@ import {
   Loader2,
 } from "lucide-react";
 import Image from "next/image";
-// --- Types ---
+
+// --- Types & Constants ---
+
 export interface Channel {
   id: string;
   name: string;
@@ -43,6 +45,7 @@ const FAST_DOMAINS = [
   "amagi",
   "mux",
 ];
+
 const PINNED_KEYWORDS = [
   "fifa+",
   "red bull",
@@ -52,6 +55,7 @@ const PINNED_KEYWORDS = [
   "nasa",
   "formula 1",
 ];
+
 const SPORTS_KEYWORDS = [
   "sport",
   "football",
@@ -80,14 +84,14 @@ export default function CosmicTVClient() {
   const [currentChannel, setCurrentChannel] = useState<Channel | null>(null);
   const [retryTrigger, setRetryTrigger] = useState(0);
   const [playerStatus, setPlayerStatus] = useState<
-    "idle" | "loading" | "playing" | "error" | "dead"
+    "idle" | "loading" | "playing" | "error" | "proxying" | "dead"
   >("idle");
 
   const [viewMode, setViewMode] = useState<"sports" | "all">("sports");
   const [search, setSearch] = useState("");
   const [limit, setLimit] = useState(50);
 
-  // -- Theme --
+  // -- Theme Handler --
   useEffect(() => {
     if (typeof document !== "undefined") {
       document.body.style.backgroundColor =
@@ -95,7 +99,7 @@ export default function CosmicTVClient() {
     }
   }, [theme]);
 
-  // -- Load History --
+  // -- LOAD HISTORY --
   useEffect(() => {
     if (typeof window !== "undefined") {
       const saved = localStorage.getItem("swiss_working_channels");
@@ -103,11 +107,13 @@ export default function CosmicTVClient() {
     }
   }, []);
 
-  // -- Fetch Playlist --
+  // -- FETCH PLAYLIST (CLIENT SIDE) --
   useEffect(() => {
     async function fetchPlaylist() {
       try {
         setIsPlaylistLoading(true);
+        console.log("Fetching fresh playlist...");
+
         const res = await fetch(
           `https://iptv-org.github.io/iptv/index.m3u?t=${Date.now()}`
         );
@@ -167,22 +173,20 @@ export default function CosmicTVClient() {
   useEffect(() => {
     if (!currentChannel || !videoRef.current) return;
 
-    // Mount safety check
-    let isMounted = true;
     const video = videoRef.current;
     let hls: Hls | null = null;
     let loadTimeout: NodeJS.Timeout;
 
     setPlayerStatus("loading");
 
+    // Timeout: If video hasn't started after 15s, show error
     loadTimeout = setTimeout(() => {
-      if (isMounted && video.paused && video.readyState < 3) {
+      if (video.paused && video.readyState < 3) {
         setPlayerStatus("error");
       }
     }, 15000);
 
     const handleSuccess = () => {
-      if (!isMounted) return;
       setPlayerStatus("playing");
       clearTimeout(loadTimeout);
 
@@ -198,19 +202,13 @@ export default function CosmicTVClient() {
       }
     };
 
-    const attemptPlay = async () => {
-      if (!isMounted || !video) return;
-      try {
-        await video.play();
-      } catch (error: any) {
-        // Ignore AbortError (happens when quickly switching channels)
-        if (error.name !== "AbortError") {
-          console.warn("Autoplay blocked, muting:", error);
-          if (video) {
-            video.muted = true;
-            video.play().catch(() => {});
-          }
-        }
+    const attemptPlay = () => {
+      const playPromise = video.play();
+      if (playPromise !== undefined) {
+        playPromise.catch(() => {
+          video.muted = true;
+          video.play().catch(console.error);
+        });
       }
     };
 
@@ -221,14 +219,16 @@ export default function CosmicTVClient() {
           hls.destroy();
         }
 
-        class RobustLoader extends Hls.DefaultConfig.loader {
+        // --- MANIFEST REWRITER LOADER ---
+        // This handles Pluto/Samsung relative paths behind a proxy
+        class ManifestRewriterLoader extends Hls.DefaultConfig.loader {
           constructor(config: any) {
             super(config);
             const load = this.load.bind(this);
             this.load = (context: any, config: any, callbacks: any) => {
               let targetUrl = context.url;
 
-              // 1. Check if we need to proxy
+              // 1. Determine if we need to proxy
               const CORS_DOMAINS = [
                 "pluto.tv",
                 "samsung",
@@ -236,108 +236,68 @@ export default function CosmicTVClient() {
                 "rakuten",
                 "amagi",
               ];
-              const isMixedContent =
-                window.location.protocol === "https:" &&
-                targetUrl.startsWith("http://");
-              const isCorsRestricted = CORS_DOMAINS.some((d) =>
-                targetUrl.includes(d)
-              );
+              const needsProxy =
+                (window.location.protocol === "https:" &&
+                  targetUrl.startsWith("http://")) ||
+                CORS_DOMAINS.some((d) => targetUrl.includes(d)) ||
+                targetUrl.includes("corsproxy.io");
 
-              // Clean previous proxy junk if it exists
-              if (
-                targetUrl.includes("api.codetabs.com") ||
-                targetUrl.includes("corsproxy.io")
-              ) {
-                targetUrl = targetUrl.replace(
+              if (needsProxy && !targetUrl.includes("api.codetabs.com")) {
+                const cleanUrl = targetUrl.replace(
                   /^(https?:\/\/)(corsproxy\.io\/\?|api\.codetabs\.com\/v1\/proxy\?quest=)/,
                   ""
                 );
-                // Decode recursively to get raw URL
-                while (decodeURIComponent(targetUrl) !== targetUrl) {
-                  targetUrl = decodeURIComponent(targetUrl);
-                }
-              }
-
-              if (isMixedContent || isCorsRestricted) {
-                // PRIMARY PROXY: CodeTabs
-                context.url = `https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(
-                  targetUrl
+                targetUrl = `https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(
+                  cleanUrl
                 )}`;
+                context.url = targetUrl;
               }
 
-              // 2. Intercept Error to try Fallback Proxy
-              const originalOnError = callbacks.onError;
-              callbacks.onError = (
-                error: any,
-                context: any,
-                networkDetails: any
-              ) => {
-                if (
-                  networkDetails.response.code === 400 ||
-                  networkDetails.response.code === 403
-                ) {
-                  // CodeTabs failed (400 Bad Request). Switch to CORSProxy.io
-                  console.log("CodeTabs failed, trying Fallback Proxy...");
-                  const cleanUrl = context.url.replace(
-                    /^(https?:\/\/)(api\.codetabs\.com\/v1\/proxy\?quest=)/,
-                    ""
-                  );
-                  const decoded = decodeURIComponent(cleanUrl);
-
-                  // Modify URL to use secondary proxy and retry
-                  context.url = `https://corsproxy.io/?${encodeURIComponent(
-                    decoded
-                  )}`;
-                  load(context, config, callbacks); // Retry immediately
-                } else {
-                  originalOnError(error, context, networkDetails);
-                }
-              };
-
-              // 3. Intercept Success to Rewrite Relative Paths (Pluto TV Fix)
+              // 2. Intercept the Success Callback to rewrite M3U8 content
               const originalOnSuccess = callbacks.onSuccess;
               callbacks.onSuccess = (
                 response: any,
                 stats: any,
                 context: any
               ) => {
+                // If it's a playlist (text response) and we are using the proxy
                 if (
-                  typeof response.data === "string" &&
-                  (context.url.includes("codetabs") ||
-                    context.url.includes("corsproxy"))
+                  context.url.includes("api.codetabs.com") &&
+                  typeof response.data === "string"
                 ) {
-                  // Simple logic: if manifest contains relative paths, make them absolute via proxy
-                  if (
-                    response.data.includes("#EXTINF") &&
-                    !response.data.includes("http")
-                  ) {
-                    // This is a naive heuristic but works for most relative playlists
-                    // We need the base URL of the actual stream, not the proxy
-                    let realBase =
-                      context.url.split("quest=")[1] ||
-                      context.url.split("?")[1];
-                    if (realBase) {
-                      realBase = decodeURIComponent(realBase);
-                      const lastSlash = realBase.lastIndexOf("/");
-                      const basePath = realBase.substring(0, lastSlash + 1);
+                  try {
+                    // Extract the "Real" Base URL from the Proxy URL
+                    // content.url looks like: ...proxy?quest=http://pluto.tv/folder/master.m3u8
+                    const match = context.url.match(/quest=(.*)$/);
+                    if (match && match[1]) {
+                      const realBaseUrl = decodeURIComponent(match[1]);
 
-                      response.data = response.data.replace(
-                        /^(?!#)(?!(http))(.*)$/gm,
-                        (match: string) => {
-                          // Re-wrap in the SAME proxy that was used for the manifest
-                          const absolute = basePath + match.trim();
-                          if (context.url.includes("codetabs")) {
+                      // Rewrite every line in the playlist
+                      const lines = response.data.split("\n");
+                      const rewritten = lines
+                        .map((line: string) => {
+                          const trim = line.trim();
+                          // Skip empty lines or tags (#)
+                          if (!trim || trim.startsWith("#")) return line;
+
+                          // It's a URL (chunklist.m3u8 or segment.ts)
+                          // Resolve it against the Real Base URL to make it absolute
+                          try {
+                            const absoluteUrl = new URL(trim, realBaseUrl).href;
+                            // Wrap it back in the proxy
                             return `https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(
-                              absolute
+                              absoluteUrl
                             )}`;
-                          } else {
-                            return `https://corsproxy.io/?${encodeURIComponent(
-                              absolute
-                            )}`;
+                          } catch (e) {
+                            return line;
                           }
-                        }
-                      );
+                        })
+                        .join("\n");
+
+                      response.data = rewritten;
                     }
+                  } catch (e) {
+                    console.warn("Failed to rewrite manifest", e);
                   }
                 }
                 originalOnSuccess(response, stats, context);
@@ -352,22 +312,28 @@ export default function CosmicTVClient() {
           enableWorker: true,
           lowLatencyMode: true,
           // @ts-ignore
-          loader: RobustLoader,
+          loader: ManifestRewriterLoader, // Use our smart rewriter
           manifestLoadingTimeOut: 15000,
           manifestLoadingMaxRetry: 2,
+          levelLoadingMaxRetry: 2,
+          fragLoadingMaxRetry: 2,
         });
 
+        // Error Handling
         hls.on(Hls.Events.ERROR, (event, data) => {
-          if (!isMounted) return;
           if (data.fatal) {
+            // Filter out specific errors to avoid console spam
             if (data.type === Hls.ErrorTypes.NETWORK_ERROR) {
+              // Recover network errors (like temporary timeouts)
               console.log("Network error, trying to recover...");
               hls?.startLoad();
             } else if (data.type === Hls.ErrorTypes.MEDIA_ERROR) {
               hls?.recoverMediaError();
             } else {
+              // Fatal errors (DNS, 404s, etc)
               hls?.destroy();
               setPlayerStatus("dead");
+              clearTimeout(loadTimeout);
             }
           }
         });
@@ -381,14 +347,23 @@ export default function CosmicTVClient() {
 
         hls.on(Hls.Events.FRAG_LOADED, handleSuccess);
       } else if (video.canPlayType("application/vnd.apple.mpegurl")) {
-        // --- Safari Native ---
+        // --- SAFARI NATIVE HLS ---
+        // Safari handles relative paths better, but still needs the proxy for CORS
         let finalUrl = currentChannel.url;
-        const needsProxy =
-          (window.location.protocol === "https:" &&
-            finalUrl.startsWith("http://")) ||
-          finalUrl.includes("pluto.tv");
+        const CORS_DOMAINS = [
+          "pluto.tv",
+          "samsung",
+          "tubi",
+          "rakuten",
+          "amagi",
+        ];
 
-        if (needsProxy) {
+        if (
+          (typeof window !== "undefined" &&
+            window.location.protocol === "https:" &&
+            finalUrl.startsWith("http://")) ||
+          CORS_DOMAINS.some((d) => finalUrl.includes(d))
+        ) {
           finalUrl = `https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(
             finalUrl
           )}`;
@@ -399,7 +374,8 @@ export default function CosmicTVClient() {
         attemptPlay();
         video.onplaying = handleSuccess;
         video.onerror = () => {
-          if (isMounted) setPlayerStatus("dead");
+          setPlayerStatus("dead");
+          clearTimeout(loadTimeout);
         };
       }
     };
@@ -407,7 +383,6 @@ export default function CosmicTVClient() {
     initStream();
 
     return () => {
-      isMounted = false;
       if (hls) hls.destroy();
       video.removeAttribute("src");
       video.load();
@@ -628,10 +603,16 @@ export default function CosmicTVClient() {
                       className={`w-1.5 h-1.5 rounded-full ${
                         playerStatus === "playing"
                           ? "bg-emerald-500"
+                          : playerStatus === "proxying"
+                          ? "bg-blue-500 animate-pulse"
                           : "bg-zinc-500"
                       }`}
                     />
-                    {playerStatus === "playing" ? "Live" : "Offline"}
+                    {playerStatus === "playing"
+                      ? "Live"
+                      : playerStatus === "proxying"
+                      ? "Unblocking..."
+                      : "Offline"}
                   </div>
                 </div>
               </div>
