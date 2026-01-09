@@ -76,7 +76,6 @@ export default function CosmicTVClient({ initialChannels }: ClientProps) {
   }, []);
 
   // -- PLAYER LOGIC --
-  // -- PLAYER LOGIC --
   useEffect(() => {
     if (!currentChannel || !videoRef.current) return;
     const video = videoRef.current;
@@ -85,7 +84,7 @@ export default function CosmicTVClient({ initialChannels }: ClientProps) {
 
     setPlayerStatus("loading");
 
-    // Timeout safety
+    // Timeout safety: If video hasn't started after 20s, show error
     loadTimeout = setTimeout(() => {
       if (video.paused && video.readyState < 3) setPlayerStatus("error");
     }, 20000);
@@ -93,6 +92,8 @@ export default function CosmicTVClient({ initialChannels }: ClientProps) {
     const handleSuccess = () => {
       setPlayerStatus("playing");
       clearTimeout(loadTimeout);
+
+      // Save working channel history
       if (!workingIds.includes(currentChannel.id)) {
         const newIds = [currentChannel.id, ...workingIds].slice(0, 50);
         setWorkingIds(newIds);
@@ -105,44 +106,49 @@ export default function CosmicTVClient({ initialChannels }: ClientProps) {
       }
     };
 
+    // Helper to attempt playback
+    const attemptPlay = () => {
+      const playPromise = video.play();
+      if (playPromise !== undefined) {
+        playPromise.catch((error) => {
+          console.log("Autoplay with sound prevented. Switching to muted.");
+          // Fallback: Mute and try playing again
+          video.muted = true;
+          video
+            .play()
+            .catch((err) => console.error("Muted playback failed", err));
+        });
+      }
+    };
+
     const initStream = () => {
       if (Hls.isSupported()) {
         if (hls) hls.destroy();
 
-        // --- CUSTOM LOADER TO FIX MIXED CONTENT & CORS ---
+        // Custom Loader to handle CORS/Mixed Content
         class MixedContentLoader extends Hls.DefaultConfig.loader {
           constructor(config: any) {
             super(config);
             const load = this.load.bind(this);
             this.load = (context: any, config: any, callbacks: any) => {
-              // 1. Try Direct if HTTPS matches or we are on localhost
-              // 2. If it's HTTP on HTTPS, or known CORS issue, Proxy it.
-
               let targetUrl = context.url;
 
-              // Check if we need to proxy
+              // Logic to detect if we need to proxy
               const needsProxy =
                 (window.location.protocol === "https:" &&
                   targetUrl.startsWith("http://")) ||
-                targetUrl.includes("corsproxy.io"); // cleanup old proxy if present
+                targetUrl.includes("corsproxy.io");
 
               if (needsProxy) {
-                // Remove existing proxy prefix if it exists to avoid double proxying
                 const cleanUrl = targetUrl.replace(
                   /^(https?:\/\/)(corsproxy\.io\/\?|api\.codetabs\.com\/v1\/proxy\?quest=)/,
                   ""
                 );
-
-                // Use a different, more reliable proxy service
-                // Option A: CodeTabs (Good for streams)
+                // Use CodeTabs for better HLS compatibility
                 context.url = `https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(
                   cleanUrl
                 )}`;
-
-                // Option B: AllOrigins (Alternative if Option A fails)
-                // context.url = `https://api.allorigins.win/raw?url=${encodeURIComponent(cleanUrl)}`;
               }
-
               load(context, config, callbacks);
             };
           }
@@ -153,17 +159,13 @@ export default function CosmicTVClient({ initialChannels }: ClientProps) {
           lowLatencyMode: true,
           // @ts-ignore
           loader: MixedContentLoader,
-          // Add stricter config to handle proxy timeouts
-          manifestLoadingTimeOut: 20000,
-          manifestLoadingMaxRetry: 2,
         });
 
         hls.on(Hls.Events.ERROR, (event, data) => {
           if (data.fatal) {
             console.error("HLS Fatal Error", data);
             if (data.type === Hls.ErrorTypes.NETWORK_ERROR) {
-              // Try to recover network error once
-              hls?.startLoad();
+              hls?.startLoad(); // Try to recover network error
             } else if (data.type === Hls.ErrorTypes.MEDIA_ERROR) {
               hls?.recoverMediaError();
             } else {
@@ -175,15 +177,16 @@ export default function CosmicTVClient({ initialChannels }: ClientProps) {
 
         hls.loadSource(currentChannel.url);
         hls.attachMedia(video);
+
+        // --- FIX: UPDATED AUTOPLAY LOGIC ---
         hls.on(Hls.Events.MANIFEST_PARSED, () => {
-          video.play().catch(() => console.log("Autoplay prevented"));
+          attemptPlay();
         });
+
         hls.on(Hls.Events.FRAG_LOADED, handleSuccess);
       } else if (video.canPlayType("application/vnd.apple.mpegurl")) {
-        // Safari (Native HLS) Logic
+        // --- Safari Native HLS Logic ---
         let finalUrl = currentChannel.url;
-
-        // Safari requires proxy for Mixed Content (HTTP on HTTPS)
         if (
           typeof window !== "undefined" &&
           window.location.protocol === "https:" &&
@@ -196,9 +199,12 @@ export default function CosmicTVClient({ initialChannels }: ClientProps) {
 
         video.src = finalUrl;
         video.load();
+
+        // --- FIX: UPDATED AUTOPLAY LOGIC FOR SAFARI ---
+        attemptPlay();
+
         video.onplaying = handleSuccess;
         video.onerror = () => setPlayerStatus("error");
-        video.play().catch(() => {});
       }
     };
 
